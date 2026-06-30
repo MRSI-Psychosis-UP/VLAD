@@ -314,7 +314,7 @@ display_help() {
     echo ""
     echo "  --metabs   		         If you want to do only one or more specific metabs on absolute value. If you put \"none\" after it, no absolute metabs will be done. The matabolites mades are different than the one with the RatioSum"
     echo "  -s, --sum [value]        With the sum of metabolites. By default will do the 5 metabolites + SumMetabs, but you can specify the ones you want."
-    echo "  -q, --quotient [value]   Metabolites quotients, NAAonCr GlxonCr ChoonCr InsonNAA InsonGlx InsonCho GlxonNAA GlxonCho ChoonNAA. Same as sum, by default all will be done but you can choose some. Globs are supported (quote in zsh, e.g. '*onCrPCr')"
+    echo "  -q, --quotients [value]  Metabolites quotients, NAAonCr GlxonCr ChoonCr InsonNAA InsonGlx InsonCho GlxonNAA GlxonCho ChoonNAA. Same as sum, by default all will be done but you can choose some. Globs are supported (quote in zsh, e.g. '*onCrPCr')"
     echo "  -d, --description        ONLY for STRUCTURAL or DTI : select the description of files you want to do the analysis. If nothing is put here, all the validated files will be analyzed"
     echo ""
     echo "  -p, --perm <value>	     Number of permutations By default 300"
