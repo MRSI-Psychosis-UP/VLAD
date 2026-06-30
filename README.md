@@ -15,6 +15,7 @@ This repository contains the current bash workflow and the Python/R helper files
 - `snapshot_results_randomise_beta5.py`: PNG snapshot generation for significant maps.
 - `Randomise_sum_up_v3.Rmd`: Randomise HTML summary.
 - `SWE_sum_up_v1.5.2.Rmd`: SwE HTML summary.
+- `Masks/`: standard HarvardOxford-derived masks that can be selected during cohort configuration.
 
 ## External prerequisites
 
@@ -134,6 +135,37 @@ The MRSI setup asks for:
 - Metabolite names. Defaults are `CrPCr NAA NAAG GPCPCh Ins Glu Gln GABA GSH`.
 - Per-metabolite file descriptions. Defaults are `signal_filtbiharmonic_pvcorr` and `crlb`.
 - Global MRSI file descriptions. Defaults are `fwhm` and `snr`.
+
+## Standard Masks
+
+The repository includes standard masks in `Masks/`. During cohort configuration, when `Prep_VLAD_b6.1.sh` asks for `MRSI_MASK_LIST`, you can select one or more of these files. The preparation script copies them into the cohort mask directory, or resamples them to the cohort reference image when needed:
+
+```text
+GLOBAL_DIR/Masques/<COHORT>/mrsi/
+```
+
+Keep the filenames unchanged, because `VLAD_beta7.sh` searches for masks by these names when using `--mask`.
+
+If you want every `--mask` preset to be available later, select all six standard masks during MRSI cohort configuration.
+
+Included masks:
+
+- `HarvardOxford-white-grey-matter.nii.gz`: default whole white plus grey matter mask.
+- `HarvardOxford-white-matter.nii.gz`: white matter mask.
+- `HarvardOxford-grey-matter.nii.gz`: grey matter mask.
+- `HarvardOxford-cortex.nii.gz`: cortical grey matter mask.
+- `HarvardOxford-subcortical-nuclei.nii.gz`: subcortical nuclei mask.
+- `HarvardOxford-white-grey-matter-cerebellum.nii.gz`: white plus grey matter plus cerebellum mask.
+
+Mask presets in `VLAD_beta7.sh` use these files:
+
+- default: `HarvardOxford-white-grey-matter.nii.gz`
+- `--mask wmgm`: white-grey-matter, white-matter, grey-matter
+- `--mask wmgmbg`: white-grey-matter, white-matter, cortex, subcortical-nuclei
+- `--mask onlygrey`: grey-matter
+- `--mask onlywhite`: white-matter
+- `--mask onlygreydetail`: grey-matter, cortex, subcortical-nuclei
+- `--mask cerebellum`: white-grey-matter-cerebellum
 
 Expected MRSI filenames are:
 

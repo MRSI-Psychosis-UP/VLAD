@@ -9,6 +9,10 @@
 !install_R_packages.R
 !VLAD_configs.example.txt
 
+# Standard masks shipped with VLAD.
+!Masks/
+!Masks/**
+
 # VLAD source files.
 !VLAD_beta7.sh
 !Prep_VLAD_b6.1.sh
