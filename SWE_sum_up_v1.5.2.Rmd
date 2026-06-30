@@ -1,0 +1,684 @@
+---
+title: ""
+author: ""
+date: ""
+output:
+  html_document:
+    css: null
+params:
+  analysis_name: "Default Analysis"
+  matrix_name: "Default Matrix"
+  file_type: "mrsi"
+  number_permut: "500"
+  savepath: NULL
+---
+
+<style>
+.flex-container {
+  display: flex;
+  align-items: flex-start;
+}
+.flex-image {
+  flex: 1;
+}
+.flex-tables {
+  flex: 2;
+}
+
+.centered-box {
+  text-align: center;
+  border: 2px solid black;
+  padding: 10px;
+  display: inline-block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 20px;
+  margin-bottom: 20px;
+}
+
+h1.title, h2.author, h3.date {
+  margin: 0;
+  padding: 0;
+}
+</style>
+
+<div class="centered-box">
+  <h1 class="title">SwE sum-up of `r params$analysis_name` population in `r params$matrix_name` matrix</h1>
+  <h3 class="date">Done the `r Sys.Date()`</h3>
+</div>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, include = TRUE)
+```
+
+```{r load-data, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+library(dplyr)
+library(tibble)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(svglite)
+library(knitr)
+library(htmltools)
+library(arrow)
+library(gtsummary)
+library(lme4)
+library(broom.mixed)
+library(purrr)
+library(tidyr)
+library(rlang)
+library(lmerTest)
+library(MuMIn)
+library(ggeffects)
+
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
+}
+
+pick_existing <- function(paths) {
+  for (p in paths) {
+    if (file.exists(p)) return(p)
+  }
+  return(NULL)
+}
+
+read_matrix_block <- function(path) {
+  lines <- readLines(path, warn = FALSE)
+  start <- grep("^/Matrix", lines)
+  if (length(start) > 0) {
+    lines <- lines[(start + 1):length(lines)]
+  }
+  lines <- lines[nzchar(trimws(lines))]
+  if (!length(lines)) return(NULL)
+  suppressMessages(
+    readr::read_table(
+      paste(lines, collapse = "\n"),
+      col_names = FALSE,
+      show_col_types = FALSE
+    )
+  )
+}
+
+read_contrast_matrix <- function(matrix_name) {
+  contrast_path <- pick_existing(c(
+    paste0(matrix_name, ".con"),
+    paste0(matrix_name, "_con.txt"),
+    paste0(matrix_name, "_contrast.txt")
+  ))
+  if (is.null(contrast_path)) return(NULL)
+  mat <- read_matrix_block(contrast_path)
+  if (is.null(mat)) return(NULL)
+  as.matrix(mat)
+}
+
+read_design_sub <- function(matrix_name) {
+  sub_path <- pick_existing(c(
+    paste0(matrix_name, "_design_sub.txt"),
+    paste0(matrix_name, ".sub"),
+    paste0(matrix_name, "-sub.sub")
+  ))
+  if (is.null(sub_path)) return(NULL)
+  sub_df <- read_matrix_block(sub_path)
+  if (is.null(sub_df)) return(NULL)
+  colnames(sub_df) <- c("subject_id", "visit_id", "group_id")[seq_len(ncol(sub_df))]
+  sub_df %>%
+    mutate(across(everything(), as.factor))
+}
+
+guess_col <- function(df, patterns) {
+  hits <- names(df)[str_detect(names(df), regex(paste(patterns, collapse = "|"), ignore_case = TRUE))]
+  if (length(hits) > 0) hits[1] else NULL
+}
+
+format_terms <- function(terms) {
+  vapply(terms, function(x) paste0("`", x, "`"), character(1))
+}
+
+max_cat_levels <- 6
+force_categorical <- character(0)
+force_continuous <- character(0)
+
+is_integerish <- function(x, tol = 1e-8) {
+  x <- x[!is.na(x)]
+  if (!length(x)) return(FALSE)
+  all(abs(x - round(x)) < tol)
+}
+
+is_binaryish <- function(x) {
+  vals <- unique(na.omit(x))
+  length(vals) == 2
+}
+
+is_categorical_var <- function(x, max_levels = max_cat_levels) {
+  if (is.factor(x) || is.character(x) || is.logical(x)) return(TRUE)
+  if (!is.numeric(x)) return(FALSE)
+  vals <- unique(na.omit(x))
+  if (!length(vals)) return(FALSE)
+  (length(vals) <= max_levels && is_integerish(vals)) || is_binaryish(vals)
+}
+
+is_continuous_var <- function(x, max_levels = max_cat_levels) {
+  is.numeric(x) && !is_categorical_var(x, max_levels = max_levels)
+}
+
+coerce_categorical <- function(df, cols, max_levels = max_cat_levels, force_cat = force_categorical, force_cont = force_continuous) {
+  for (nm in cols) {
+    if (!nm %in% names(df)) next
+    if (nm %in% force_cont) next
+    if (nm %in% force_cat || is_categorical_var(df[[nm]], max_levels = max_levels)) {
+      df[[nm]] <- factor(df[[nm]])
+    }
+  }
+  df
+}
+
+parse_interaction_parts <- function(term) {
+  if (is.null(term)) return(NULL)
+  if (grepl("_x_", term, fixed = TRUE)) return(strsplit(term, "_x_", fixed = TRUE)[[1]])
+  if (grepl(":", term, fixed = TRUE)) return(strsplit(term, ":", fixed = TRUE)[[1]])
+  if (grepl("*", term, fixed = TRUE)) return(strsplit(term, "*", fixed = TRUE)[[1]])
+  NULL
+}
+
+path_to_save <- params$savepath %||% getwd()
+number_permutations <- params$number_permut
+matrix_basename <- params$matrix_name
+
+matrix_csv_path <- paste0(matrix_basename, ".csv")
+if (!file.exists(matrix_csv_path)) {
+  stop("Matrix file ", matrix_csv_path, " not found. Cannot proceed.")
+}
+
+design_matrix <- read_tsv(matrix_csv_path, show_col_types = FALSE) %>%
+  as_tibble()
+design_terms <- names(design_matrix)
+
+subject_col <- guess_col(design_matrix, c("subj", "subject", "id"))
+visit_col <- guess_col(design_matrix, c("visit", "ses", "time", "tp"))
+group_col <- guess_col(design_matrix, c("group", "grp"))
+
+id_cols <- c(subject_col, visit_col) %>% discard(is.null)
+
+design_terms_nuid <- design_terms[!design_terms %in% id_cols]
+vars_for_type <- setdiff(design_terms_nuid, "Intercept")
+design_matrix <- coerce_categorical(design_matrix, vars_for_type)
+
+combined_data <- design_matrix
+
+if (!is.null(group_col) && group_col %in% names(combined_data)) {
+  combined_data[[group_col]] <- as.factor(combined_data[[group_col]])
+}
+
+txt_files_path <- paste0("To_analyse_with_R_", params$analysis_name, "_", params$matrix_name, ".txt")
+if (!file.exists(txt_files_path)) {
+  stop("File listing analyses for R (", txt_files_path, ") not found.")
+}
+txt_files_paths <- readLines(txt_files_path, warn = FALSE)
+
+analysis_specs <- tibble()
+
+for (txt_file_path in txt_files_paths) {
+  if (!file.exists(txt_file_path)) next
+
+  mean_values <- read_tsv(txt_file_path, col_names = FALSE, show_col_types = FALSE) %>%
+    setNames(c("MeanValue"))
+
+  filename <- str_replace(basename(txt_file_path), "\\..*$", "")
+  matches <- str_match(
+    filename,
+    "^meants__(.+?)__(.+?)__(.+?)__(.+?)__(.+?)__contrast(\\d+)$"
+  )
+  if (is.na(matches[1, 1])) {
+    warning("Skipping file with unexpected name format: ", filename)
+    next
+  }
+
+  met <- matches[1, 3]
+  matrix_label <- matches[1, 4]
+  acquisition_name <- matches[1, 5]
+  mask_name <- matches[1, 6]
+  contrast_id <- suppressWarnings(as.integer(matches[1, 7]))
+  contrast_id_val <- ifelse(is.na(contrast_id), 0L, contrast_id)
+
+  base_name <- paste(met, matrix_label, acquisition_name, mask_name, sep = "__")
+  column_name <- paste(base_name, paste0("contrast", contrast_id_val), sep = "__")
+
+  if (nrow(mean_values) != nrow(combined_data)) {
+    warning("Skipping ", txt_file_path, " because row counts do not match the matrix.")
+    next
+  }
+
+  combined_data[[column_name]] <- mean_values[[1]]
+
+  analysis_specs <- bind_rows(
+    analysis_specs,
+    tibble(
+      column_name = column_name,
+      contrast_id = contrast_id,
+      base_name = base_name,
+      brain_image = paste0(column_name, ".png")
+    )
+  )
+}
+
+if (nrow(analysis_specs) == 0) {
+  stop("No valid analyses were loaded from ", txt_files_path)
+}
+
+# Save a feather backup of the merged data if a writable path is provided
+if (!is.null(path_to_save)) {
+  date_stamp <- Sys.Date()
+  feather_name <- paste0(params$analysis_name, "_", matrix_basename, "_", date_stamp, "_swe.feather")
+  feather_path <- file.path(path_to_save, feather_name)
+  try(write_feather(combined_data, feather_path), silent = TRUE)
+}
+
+contrast_matrix <- read_contrast_matrix(matrix_basename)
+contrast_terms <- design_terms_nuid
+if (!is.null(contrast_matrix) && ncol(contrast_matrix) != length(contrast_terms)) {
+  warning("Contrast file and design matrix have different numbers of columns. Aligning by the smallest dimension.")
+  keep <- seq_len(min(ncol(contrast_matrix), length(contrast_terms)))
+  contrast_matrix <- contrast_matrix[, keep, drop = FALSE]
+  contrast_terms <- contrast_terms[keep]
+}
+
+main_matrix_image_path <- paste0(matrix_basename, "_visualisation.png")
+main_matrix_correlation_path <- paste0(matrix_basename, "_correlation_matrix.png")
+```
+
+## Sum-up of main matrix
+
+<div class="flex-container">
+
+<div class="flex-image">
+<!-- HTML Image tag with dynamic src and title -->
+<img src="`r main_matrix_image_path`" alt="Design heatmap" width="500" />
+</div>
+
+<div class="flex-tables">
+
+```{r sum_up_matrix, echo=FALSE, warning= FALSE, message= FALSE}
+analysis_cols <- analysis_specs$column_name
+summary_data <- design_matrix %>% select(-any_of(c(id_cols, analysis_cols)))
+
+if (!is.null(group_col) && group_col %in% names(design_matrix)) {
+  table <- design_matrix %>%
+    select(-any_of(c(id_cols, analysis_cols))) %>%
+    tbl_summary(
+      by = all_of(group_col),
+      statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)")
+    ) %>%
+    add_p()
+} else {
+  table <- summary_data %>%
+    tbl_summary(
+      statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)")
+    )
+}
+table
+```
+
+<br />
+<br />
+<div style="text-align: center;">
+<img src="`r main_matrix_correlation_path`" alt="Correlation heatmap" width="300" />
+</div>
+</div>
+</div>
+
+## Sum-up of significant analyses (linear mixed models)
+
+```{r sum_up_analyses, echo=FALSE, results='asis', warning=FALSE, message=FALSE}
+analysis_cols <- analysis_specs$column_name
+fixed_effects <- setdiff(design_terms_nuid, c("Intercept", id_cols))
+
+for (idx in seq_len(nrow(analysis_specs))) {
+  entry <- analysis_specs[idx, ]
+  response <- entry$column_name
+  contrast_id <- entry$contrast_id
+
+  current_data <- combined_data %>%
+    select(any_of(c(id_cols, design_terms, response))) %>%
+    drop_na(all_of(response))
+
+  if (!nrow(current_data)) next
+
+  contrast_row <- NULL
+  if (!is.null(contrast_matrix) && !is.na(contrast_id) &&
+      contrast_id > 0 && contrast_id <= nrow(contrast_matrix)) {
+    contrast_row <- contrast_matrix[contrast_id, , drop = TRUE]
+  }
+
+  main_predictors <- character(0)
+  if (!is.null(contrast_row)) {
+    main_predictors <- contrast_terms[which(abs(contrast_row) > 1e-6)]
+    main_predictors <- setdiff(main_predictors, "Intercept")
+  }
+
+  x_var <- if (length(main_predictors) > 0) {
+    main_predictors[1]
+  } else if (!is.null(visit_col)) {
+    visit_col
+  } else if (length(fixed_effects) > 0) {
+    fixed_effects[1]
+  } else {
+    NULL
+  }
+
+  # Build model formula
+  rhs_terms <- setdiff(design_terms_nuid, c("Intercept", id_cols))
+  safe_rhs <- format_terms(rhs_terms)
+  rhs <- if (length(safe_rhs) > 0) paste(safe_rhs, collapse = " + ") else "1"
+  if (!is.null(subject_col)) {
+    rhs <- paste(rhs, paste0("(1 | `", subject_col, "`)"), sep = " + ")
+  }
+  form <- as.formula(paste0("`", response, "` ~ ", rhs))
+
+  model <- tryCatch(
+    withCallingHandlers(
+      lmer(form, data = current_data, REML = FALSE),
+      warning = function(w) {
+        message("Model warning for ", response, ": ", conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(model)) {
+    next
+  }
+  
+
+
+  fe_tab <- coef(summary(model))  # with lmerTest this contains df and p
+  r2_vals <- tryCatch(r.squaredGLMM(model), error = function(e) NULL)
+
+  beta <- se <- tval <- pval <- df_val <- ci_low <- ci_high <- NA_real_
+
+  if (!is.null(x_var) && x_var %in% rownames(fe_tab)) {
+    beta   <- fe_tab[x_var, "Estimate"]
+    se     <- fe_tab[x_var, "Std. Error"]
+    tval   <- fe_tab[x_var, "t value"]
+    df_val <- if ("df" %in% colnames(fe_tab)) fe_tab[x_var, "df"] else NA_real_
+    pval   <- if ("Pr(>|t|)" %in% colnames(fe_tab)) fe_tab[x_var, "Pr(>|t|)"] else NA_real_
+
+    # 95% CI (you can switch method = "profile" if you like, but it's slower)
+    ci <- suppressMessages(confint(model, parm = x_var, method = "Wald"))
+    ci_low  <- ci[1]
+    ci_high <- ci[2]
+  }
+
+  cat("\n**Fixed effect for** `", x_var, "`:\n\n", sep = "")
+  if (!is.na(beta)) {
+    cat(
+      "- β = ", round(beta, 3),
+      " [", round(ci_low, 3), ", ", round(ci_high, 3), "]",
+      ", SE = ", round(se, 3),
+      ", t", if (!is.na(df_val)) paste0("(", round(df_val, 1), ")") else "",
+      " = ", round(tval, 2),
+      if (!is.na(pval)) paste0(", p = ", signif(pval, 3)) else "",
+      "\n", sep = ""
+    )
+  }
+
+  if (!is.null(r2_vals)) {
+    cat(
+      "- R² (marginal) = ", round(r2_vals[1], 3),
+      ", R² (conditional) = ", round(r2_vals[2], 3),
+      "\n\n", sep = ""
+    )
+  }
+  
+
+  rhs_terms_no_ids <- setdiff(rhs_terms, "Intercept")
+
+  title <- paste("Visualization and mixed-model of", entry$base_name, " - contrast", contrast_id)
+  cat('<div style="border: 2px solid black; padding: 10px; margin-bottom: 20px;">\n')
+  cat('<div style="text-align: center; font-size: 18px; font-weight: bold;">', title, '</div>')
+
+  # Model display
+  model_desc <- paste(response, "~", if (length(rhs_terms_no_ids) > 0) paste(rhs_terms_no_ids, collapse = " + ") else "1")
+  if (!is.null(subject_col)) {
+    model_desc <- paste(model_desc, "+ (1 |", subject_col, ")")
+  }
+  cat("\n\n**Model:** ", model_desc, "\n\n")
+
+  plot_df <- current_data %>% drop_na(all_of(c(response, x_var)))
+
+  # Default x variable for plotting and default color aesthetic
+  plot_x_var <- x_var
+  color_aes <- if (!is.null(group_col) && group_col %in% names(plot_df)) group_col else subject_col
+
+  # Detect interaction terms encoded as Var1_x_Var2
+  time_var  <- NULL
+  group_var <- NULL
+  interaction_parts <- parse_interaction_parts(x_var)
+  is_interaction <- !is.null(interaction_parts)
+
+  if (is_interaction) {
+    parts <- interaction_parts
+    if (length(parts) == 2 && all(parts %in% names(plot_df))) {
+      var_a <- parts[1]
+      var_b <- parts[2]
+      is_a_cont <- is_continuous_var(plot_df[[var_a]])
+      is_b_cont <- is_continuous_var(plot_df[[var_b]])
+      is_a_cat  <- is_categorical_var(plot_df[[var_a]])
+      is_b_cat  <- is_categorical_var(plot_df[[var_b]])
+
+      # Only handle the case where one is continuous and the other is categorical
+      if (is_a_cont && is_b_cat) {
+        time_var  <- var_a
+        group_var <- var_b
+      } else if (is_b_cont && is_a_cat) {
+        time_var  <- var_b
+        group_var <- var_a
+      }
+
+      if (!is.null(time_var) && !is.null(group_var)) {
+
+        # Ensure group variable is a factor
+        if (!is.factor(plot_df[[group_var]])) {
+          plot_df[[group_var]] <- factor(plot_df[[group_var]])
+        }
+
+        # For plotting, use the numeric variable on the x-axis and color by the group variable
+        plot_x_var <- time_var
+        color_aes  <- group_var
+      }
+    }
+  }
+
+  is_x_numeric <- !is.null(plot_x_var) && is_continuous_var(plot_df[[plot_x_var]])
+  if (!is_x_numeric && !is.null(plot_x_var)) {
+    plot_df[[plot_x_var]] <- factor(plot_df[[plot_x_var]])
+  }
+  if (!is.null(color_aes) && is_categorical_var(plot_df[[color_aes]])) {
+    plot_df[[color_aes]] <- factor(plot_df[[color_aes]])
+  }
+
+  p <- ggplot(plot_df, aes(x = .data[[plot_x_var]], y = .data[[response]])) +
+    theme_classic(base_size = 14) +
+    labs(
+      x = plot_x_var,
+      y = response,
+      title = paste0(entry$base_name, " (contrast ", contrast_id, ")"),
+      caption = paste("Nb permutations:", number_permutations, "| File type:", params$file_type)
+    )
+
+  if (!is.null(subject_col) && is_x_numeric) {
+    if (!is.null(color_aes)) {
+      p <- p + geom_line(aes(group = .data[[subject_col]], color = .data[[color_aes]]), alpha = 0.35)
+    } else {
+      p <- p + geom_line(aes(group = .data[[subject_col]]), alpha = 0.35)
+    }
+  }
+  if (!is.null(color_aes)) {
+    if (is_x_numeric) {
+      p <- p + geom_point(aes(color = .data[[color_aes]]), size = 2.5, alpha = 0.7)
+    } else {
+      p <- p + geom_jitter(aes(color = .data[[color_aes]]), width = 0.1, size = 2.5, alpha = 0.7)
+    }
+  } else {
+    if (is_x_numeric) {
+      p <- p + geom_point(size = 2.5, alpha = 0.7)
+    } else {
+      p <- p + geom_jitter(width = 0.1, size = 2.5, alpha = 0.7)
+    }
+  }
+
+  if (is_interaction && !is.null(time_var) && !is.null(group_var)) {
+    # NOTE:
+    # The interaction in the design matrix is typically represented as a *product column*
+    # (e.g. Age_W_x_Sex), not as a formula term Age_W:Sex.
+    # ggpredict(model, terms=c(time_var, group_var)) does NOT automatically recompute
+    # the product column when varying time_var and group_var, so it can yield nearly
+    # identical slopes. We therefore build a prediction grid manually and recompute
+    # any available "_x_" product terms.
+
+    # Helper: robust numeric conversion for factor/character 0/1, 1/2, etc.
+    as_num_safe <- function(v) {
+      if (is.factor(v)) v <- as.character(v)
+      out <- suppressWarnings(as.numeric(v))
+      if (all(is.na(out))) {
+        # fallback: map factor/character levels to 0..K-1
+        out <- as.integer(factor(v)) - 1L
+      }
+      out
+    }
+
+    # Base grid: vary time_var across its observed range, for each level of group_var
+    x_seq <- seq(
+      min(plot_df[[time_var]], na.rm = TRUE),
+      max(plot_df[[time_var]], na.rm = TRUE),
+      length.out = 100
+    )
+    g_lev <- levels(factor(plot_df[[group_var]]))
+
+    pred_g <- expand.grid(
+      tmp_x = x_seq,
+      tmp_g = g_lev,
+      KEEP.OUT.ATTRS = FALSE,
+      stringsAsFactors = FALSE
+    )
+    names(pred_g)[names(pred_g) == "tmp_x"] <- time_var
+    names(pred_g)[names(pred_g) == "tmp_g"] <- group_var
+    pred_g[[group_var]] <- factor(pred_g[[group_var]], levels = g_lev)
+
+    # Fill other fixed effects with typical values (mean for numeric, reference for factor)
+    for (nm in rhs_terms) {
+      if (!nm %in% names(plot_df)) next
+      if (nm %in% c(time_var, group_var)) next
+
+      # If this is a product term like A_x_B and both components exist in pred_g,
+      # recompute it instead of holding it constant.
+      if (grepl("_x_", nm, fixed = TRUE)) {
+        parts_nm <- strsplit(nm, "_x_", fixed = TRUE)[[1]]
+        if (length(parts_nm) == 2 && all(parts_nm %in% names(pred_g))) {
+          a <- parts_nm[1]; b <- parts_nm[2]
+          pred_g[[nm]] <- as_num_safe(pred_g[[a]]) * as_num_safe(pred_g[[b]])
+          next
+        }
+      }
+
+      if (is.numeric(plot_df[[nm]])) {
+        pred_g[[nm]] <- mean(plot_df[[nm]], na.rm = TRUE)
+      } else {
+        pred_g[[nm]] <- factor(plot_df[[nm]]) %>% levels() %>% .[1] %>% factor(levels = levels(factor(plot_df[[nm]])))
+      }
+    }
+
+    # Also ensure the *tested* interaction column is recomputed if it is a product term
+    if (!is.null(x_var) && grepl("_x_", x_var, fixed = TRUE) && x_var %in% rhs_terms) {
+      parts_x <- strsplit(x_var, "_x_", fixed = TRUE)[[1]]
+      if (length(parts_x) == 2 && all(parts_x %in% names(pred_g))) {
+        pred_g[[x_var]] <- as_num_safe(pred_g[[parts_x[1]]]) * as_num_safe(pred_g[[parts_x[2]]])
+      }
+    }
+
+    # Fixed-effects prediction (population-level)
+    pred_g$predicted <- as.numeric(predict(model, newdata = pred_g, re.form = NA))
+
+    p <- p +
+      geom_line(
+        data = pred_g,
+        inherit.aes = FALSE,
+        aes(x = .data[[time_var]], y = predicted, color = .data[[group_var]], group = .data[[group_var]]),
+        linewidth = 1
+      )
+
+  } else if (is_x_numeric) {
+    # Simple numeric predictor: one population-level slope
+    pred_g <- ggpredict(model, terms = paste0(x_var, " [all]")) %>%
+      as.data.frame()
+
+    p <- p +
+      geom_ribbon(
+        data = pred_g,
+        inherit.aes = FALSE,
+        aes(x = x, ymin = conf.low, ymax = conf.high),
+        alpha = 0.15
+      ) +
+      geom_line(
+        data = pred_g,
+        inherit.aes = FALSE,
+        aes(x = x, y = predicted),
+        linewidth = 1
+      )
+
+  } else if (!is.null(x_var)) {
+    # Purely categorical predictor: show model-based means with CI
+    pred_g <- ggpredict(model, terms = x_var) %>%
+      as.data.frame()
+
+    p <- p +
+      geom_point(
+        data = pred_g,
+        inherit.aes = FALSE,
+        aes(x = x, y = predicted),
+        size = 3
+      ) +
+      geom_errorbar(
+        data = pred_g,
+        inherit.aes = FALSE,
+        aes(x = x, ymin = conf.low, ymax = conf.high),
+        width = 0.15
+      )
+  }
+
+  subtitle_txt <- NULL
+  if (!is.na(beta)) {
+    subtitle_txt <- paste0(
+      "β_", x_var, " = ", round(beta, 3),
+      " [", round(ci_low, 3), ", ", round(ci_high, 3), "]",
+      if (!is.na(pval)) paste0(", p = ", signif(pval, 2)) else "",
+      if (!is.null(r2_vals)) paste0(
+        " | R²m = ", round(r2_vals[1], 2),
+        ", R²c = ", round(r2_vals[2], 2)
+      ) else ""
+    )
+  }
+
+  p <- p + labs(subtitle = subtitle_txt)
+
+  # Save plot if possible
+  plot_path <- file.path(path_to_save %||% getwd(), paste0(response, "_lme.svg"))
+  try(
+    ggsave(plot_path, plot = p, width = 8, height = 6, device = svglite::svglite),
+    silent = TRUE
+  )
+
+  image_candidates <- c(
+    paste0(entry$column_name, ".png"),
+    paste0(entry$base_name, ".png")
+  )
+  image_path <- pick_existing(image_candidates) %||% image_candidates[1]
+
+  cat('<div style="text-align: center;">\n')
+  cat("\n\n![](", image_path, ")\n\n", sep = "")
+  cat("\n\n![](", plot_path, ")\n\n", sep = "")
+  cat('</div>')
+
+  cat('</div>\n')
+}
+```

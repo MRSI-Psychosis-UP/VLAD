@@ -1,0 +1,296 @@
+---
+title: ""
+author: ""
+date: ""
+output: 
+  html_document:
+    css: null
+params:
+  analysis_name: "Default Analysis"
+  matrix_name: "Default Matrix"
+  number_permut: "500"
+  savepath: "Default Variable"
+---
+
+
+<style>
+.flex-container {
+  display: flex;
+  align-items: flex-start;
+}
+.flex-image {
+  flex: 1;
+}
+.flex-tables {
+  flex: 2;
+}
+
+.centered-box {
+  text-align: center;
+  border: 2px solid black;
+  padding: 10px;
+  display: inline-block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 20px;
+  margin-bottom: 20px;
+}
+
+h1.title, h2.author, h3.date {
+  margin: 0;
+  padding: 0;
+}
+</style>
+
+<div class="centered-box">
+  <h1 class="title">VLAD sum-up of `r params$analysis_name` population in `r params$matrix_name` matrix</h1>
+  <h3 class="date">Done the `r Sys.Date()`</h3>
+</div>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, include = TRUE)
+```
+
+
+
+```{r load-data, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+library(dplyr)
+library(tibble)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(knitr)
+library(htmltools)
+library(png)
+library(arrow)
+library(ggstatsplot)
+library(gtsummary)
+library(rlang)
+
+path_to_save <- params$savepath
+number_permutations <-params$number_permut
+
+main_matrix <- read_tsv(paste0(params$matrix_name, ".csv"))
+
+
+# Read the file paths from the file
+txt_files_paths <- readLines(paste0("To_analyse_with_R_", params$analysis_name, "_", params$matrix_name, ".txt"))
+#variable_interest <- params$main_variable
+variable_interest <- readLines(paste0("main_variable_", params$matrix_name, ".txt"), warn = FALSE)
+variable_interest_len <- length(variable_interest)
+
+#### On regarde quel type de variable c'est 
+# Determine the type of analysis based on the unique values
+if (variable_interest_len > 2) {
+  type_analysis <- "anova"
+} else if (variable_interest_len == 2) {
+  type_analysis <- "group"
+} else {
+  type_analysis <- "continuous"
+}
+
+#Create a column for group if we are in ANOVA
+if (type_analysis == "anova"){
+  main_matrix$group <- Reduce(function(current_group, col_name) {
+  ifelse(is.na(current_group) & main_matrix[[col_name]] == 1, col_name, current_group)
+}, variable_interest, init = NA)
+  main_matrix$group <- factor(main_matrix$group, levels = variable_interest)
+} else if (type_analysis == "group") {
+  # Add a new column 'group' to indicate the highest or lowest value
+  main_matrix$group <- ifelse(main_matrix[[variable_interest[1]]] > main_matrix[[variable_interest[2]]],
+                                variable_interest[1],
+                                variable_interest[2])
+  
+  # Ensure 'group' is a factor with levels equal to the values in 'variable_interest'
+  main_matrix$group <- factor(main_matrix$group, levels = variable_interest)
+}
+
+
+#### On en fait un tibble
+combined_data <- tibble(main_matrix)
+
+#### On fout toutes les valeurs au fur et à mesure dans le tableau
+column_names <- c() ##Vecteur avec tous les noms des colonnes qu'on va rajouter
+
+for (txt_file_path in txt_files_paths) {
+  # Read the file without assuming a header
+  mean_values <- read_tsv(txt_file_path, col_names = FALSE) %>%
+    setNames(c("MeanValue"))  # Set the column name
+  
+  # Extract the parts of the filename without the directory and extension
+  filename <- str_replace(basename(txt_file_path), "\\..*$", "")
+  matches <- str_match(
+    filename,
+    "^meants__(.+?)__(.+?)__(.+?)__(.+?)__(.+?)__contrast(\\d+)$"
+  )
+  if (is.na(matches[1, 1])) {
+    warning("Skipping file with unexpected name format: ", filename)
+    next
+  }
+  met <- matches[1, 3]
+  matrix_label <- matches[1, 4]
+  acquisition_name <- matches[1, 5]
+  mask_name <- matches[1, 6]
+  contrast_name <- paste0("contrast", matches[1, 7])
+  
+  # Use parts of the filename to create a name for the column
+  column_name <- paste(met, matrix_label, acquisition_name, mask_name, contrast_name, sep = "__")
+  
+  # Set the name of the column in the dataframe
+  names(mean_values) <- column_name
+  
+  # Bind the data to the combined tibble
+  combined_data <- bind_cols(combined_data, mean_values)
+  
+  # Append the new column name to the vector
+  column_names <- c(column_names, column_name)
+}
+
+
+###====
+#Saving the tibble into a feather database file
+
+# Assuming params$analysis_name and params$matrix_name are defined
+date <- Sys.Date()
+unique_name <- paste0(params$analysis_name, "_", params$matrix_name, "_", date, ".feather")
+file_path <- file.path(path_to_save, unique_name)
+
+# Save the tibble to a new Feather file
+write_feather(combined_data, file_path)
+
+###==== 
+#Image matrix
+main_matrix_image_path <- paste0(params$matrix_name, "_visualisation.png")
+main_matrix_correlation_path <- paste0(params$matrix_name, "_correlation_matrix.png")
+
+```
+
+## Sum-up of main matrix
+
+<div class="flex-container">
+
+<div class="flex-image">
+<!-- HTML Image tag with dynamic src and title -->
+<img src="`r main_matrix_image_path`" alt="Dynamic Image" width="500" />
+</div>
+
+<div class="flex-tables">
+
+```{r sum_up_matrix, echo=FALSE, warning= FALSE, message= FALSE}
+
+if (type_analysis != "continuous") {
+table <- main_matrix %>% select(-any_of(variable_interest)) %>% tbl_summary(by = group, statistic = list(all_continuous() ~"{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)")) %>% add_p()
+table
+} else {
+  table <- main_matrix %>% select(-Intercept) %>%tbl_summary(statistic = list(all_continuous() ~"{mean} ({sd})", all_categorical() ~ "{n} / {N} ({p}%)"))
+  table
+}
+# Loop through the list of summary tables and print them
+# for (colname in names(summary_tables)) {
+#   cat(paste0("\n\n### Summary for ", colname, "\n"))
+#   print(kable(summary_tables[[colname]], caption = paste("Summary Statistics of", colname)))
+# }
+
+```
+
+<br />
+<br />
+<div style="text-align: center;">
+<img src="`r main_matrix_correlation_path`" alt="Dynamic Image" width="300" />
+</div>
+</div>
+</div>
+
+
+
+## Sum-up of significative analyses
+
+```{r sum_up_analyses, echo=FALSE, results='asis', include=TRUE}
+
+# Looping through the columns and ploting them according to the type of analysis we are in
+
+#print(combined_data)
+
+for (column_name in column_names) {
+  parts_column_name <- str_split(column_name, "__", simplify = TRUE)
+  
+  # Use parts of the filename to create a name for the column
+  # Adjust the index numbers based on how you want to use the parts
+  #column_name <- paste(parts[3], parts[4], parts[5], parts[6], sep = "_")
+  Met <- parts_column_name[1]
+  Matrix <- parts_column_name[2]
+  acq <- parts_column_name[3]
+  mask <- parts_column_name[4]
+  contrast <- parts_column_name[5]
+  
+  if (type_analysis != "continuous") {
+    plot <- ggbetweenstats(
+  data = combined_data,
+  x = group,
+  y = !!sym(column_name),
+  xlab = "Group",
+  ylab = Met,
+  bf.message = FALSE,
+  caption = paste("File:", acq, ", Mask:", mask, ",", contrast, ", Nb permutations: ", number_permutations),
+  pairwise.display = "significant",
+  title = paste(Met,"by", Matrix, "in significative regions"),
+  ggtheme = theme_classic(),  # You can use any theme you prefer
+  point.args = list(size = 4, alpha = 0.8) 
+) + 
+  theme(
+    axis.title.x = element_text(size = 16),  # Increase x axis label size
+    axis.title.y = element_text(size = 16),  # Increase y axis label size
+    axis.text.x = element_text(size = 14),   # Increase x axis text size
+    plot.title = element_text(size = 20, hjust = 0.5)  # Center and increase title size
+  )
+    
+  } else if (type_analysis == "continuous") {
+    plot <- ggscatterstats(combined_data, 
+                           x = !!sym(variable_interest), 
+                           y = !!sym(column_name),
+                           xlab = variable_interest, 
+                           ylab = Met, 
+                           bf.message = FALSE,
+                           caption = paste("File:", acq, ", Mask:", mask, ",", contrast, ", Nb permutations: ", number_permutations),
+                           ggtheme = theme_classic(),
+                           point.args = list(size = 4, alpha = 0.8),
+                           title = paste(Met,"by", Matrix, "in significative regions") )+ 
+                             theme(
+                               axis.title.x = element_text(size = 16),  # Increase x axis label size
+                               axis.title.y = element_text(size = 16),  # Increase y axis label size
+                               axis.text.x = element_text(size = 14),   # Increase x axis text size
+                               plot.title = element_text(size = 20, hjust = 0.5)  # Center and increase title size
+    )
+  
+  }
+  
+  
+  
+  # Define the title
+  title <- paste("Visualization and plot of", Met, "based on", Matrix)
+  
+  # Display the section with a box around it
+  cat('<div style="border: 2px solid black; padding: 10px; margin-bottom: 20px;">\n')
+  
+  # Print the title
+  cat('<div style="text-align: center; font-size: 18px; font-weight: bold;">', title, '</div>')
+
+  #print(plot)
+  
+  #print(column_name)
+  name_plot <- paste0(path_to_save, "/", column_name, date, ".svg")
+  ggsave(name_plot, plot = plot, width = 7.5, height = 6)
+  
+  # Create the path for the image
+  image_path <- paste0(column_name, ".png")
+  # Include the image using Markdown syntax
+  cat('<div style="text-align: center;">\n')
+  cat("\n\n![](", image_path, ")\n\n", sep = "")
+  cat("\n\n![](", name_plot, ")\n\n", sep = "")
+  cat('</div>')
+  cat('</div>')
+  
+  
+}
+
+```

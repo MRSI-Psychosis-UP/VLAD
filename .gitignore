@@ -1,0 +1,30 @@
+# Track only the VLAD bash workflow source files and installation metadata.
+*
+
+# Repository metadata.
+!.gitignore
+!README.md
+!requirements.txt
+!requirements.R
+!install_R_packages.R
+!VLAD_configs.example.txt
+
+# VLAD source files.
+!VLAD_beta7.sh
+!Prep_VLAD_b6.1.sh
+!create_matrix_randoMRSI_beta6.py
+!create_matrix_VLADlov_swe_alpha2.py
+!create_matrix_VLADlov_afni_alpha1.py
+!resample_masks_b3_replace.py
+!snapshot_results_randomise_beta5.py
+!Randomise_sum_up_v3.Rmd
+!SWE_sum_up_v1.5.2.Rmd
+
+# Local state and nested development repository.
+VLAD_py/
+VLAD_configs.txt
+VLAD_batch_commands.txt
+.DS_Store
+Rplots.pdf
+__pycache__/
+*.py[cod]

@@ -1,0 +1,23 @@
+vlad_r_packages <- c(
+  "arrow",
+  "broom.mixed",
+  "dplyr",
+  "ggeffects",
+  "ggplot2",
+  "ggstatsplot",
+  "gtsummary",
+  "htmltools",
+  "knitr",
+  "lme4",
+  "lmerTest",
+  "MuMIn",
+  "png",
+  "purrr",
+  "readr",
+  "rlang",
+  "rmarkdown",
+  "stringr",
+  "svglite",
+  "tibble",
+  "tidyr"
+)
