@@ -59,34 +59,28 @@ name_subject_file() {
     local subject=$1
     local visit=$2
     local data_type=$3
-    local acquisition=$4
+    local bids_infix=$4
     local description=$5
     local compressed=$6
-    local space_label=${7:-mni}
-    local extra_tags=${8:-}
 
     subject=$(trim_whitespace "$subject")
     visit=$(trim_whitespace "$visit")
     data_type=$(trim_whitespace "$data_type")
-    acquisition=$(trim_whitespace "$acquisition")
+    bids_infix=$(normalize_bids_infix "$bids_infix")
     description=$(trim_whitespace "$description")
     compressed=$(trim_whitespace "$compressed")
-    space_label=$(trim_whitespace "$space_label")
-    extra_tags=$(trim_whitespace "$extra_tags")
 
-    if [[ $# -lt 6 || $# -gt 8 ]]; then
+    if [[ $# -ne 6 ]]; then
         echo "name_subject_file badly used, this will cause some errors. Exiting"
-        exit 1
+        return 1
     fi
 
-    local tag_suffix="_space-${space_label}"
-    if [[ -n "$extra_tags" ]]; then
-        for tag in $extra_tags; do
-            tag_suffix+="_${tag}"
-        done
+    local tag_suffix=""
+    if [[ -n "$bids_infix" ]]; then
+        tag_suffix="_${bids_infix}"
     fi
 
-    echo "sub-${subject}_ses-${visit}${tag_suffix}_acq-${acquisition}_desc-${description}_${data_type}.nii${compressed}"
+    echo "sub-${subject}_ses-${visit}${tag_suffix}_desc-${description}_${data_type}.nii${compressed}"
 
 }
 
@@ -225,6 +219,54 @@ trim_whitespace() {
     printf '%s' "$str"
 }
 
+normalize_bids_infix() {
+    local infix
+    infix=$(trim_whitespace "$1")
+
+    while [[ "$infix" == _* ]]; do
+        infix="${infix#_}"
+    done
+    while [[ "$infix" == *_ ]]; do
+        infix="${infix%_}"
+    done
+
+    printf '%s' "$infix"
+}
+
+build_bids_infix_from_parts() {
+    local space_label
+    local extra_tags
+    local acquisition
+    local infix
+
+    space_label=$(trim_whitespace "${1:-mni}")
+    extra_tags=$(trim_whitespace "${2:-}")
+    acquisition=$(trim_whitespace "${3:-}")
+
+    infix="space-${space_label}"
+    if [[ -n "$extra_tags" ]]; then
+        for tag in $extra_tags; do
+            infix+="_${tag}"
+        done
+    fi
+    if [[ -n "$acquisition" ]]; then
+        infix+="_acq-${acquisition}"
+    fi
+
+    normalize_bids_infix "$infix"
+}
+
+resolve_bids_infix() {
+    local explicit_infix
+    explicit_infix=$(normalize_bids_infix "${1:-}")
+
+    if [[ -n "$explicit_infix" ]]; then
+        printf '%s' "$explicit_infix"
+    else
+        build_bids_infix_from_parts "${2:-mni}" "${3:-}" "${4:-}"
+    fi
+}
+
 resolve_mask_source_path() {
     local entry="$1"
     local dest_dir="$2"
@@ -309,19 +351,17 @@ get_reference_image_path() {
         search_dir="$NII_DIR_MRSI"
         ;;
     dti)
-        local dtispace=${DTI_SPACE_LABEL:-mni}
-        local dtiextra=${DTI_EXTRA_TAGS:-}
         local dtisuffix=${DTI_DATA_SUFFIX:-dwi}
-        local dtiacq=${DTI_ACQ_LABEL:-dti}
-        candidate=$(name_subject_file "$sub" "$visit" "$dtisuffix" "$dtiacq" "$desc" "$DTI_COMPRESSED" "$dtispace" "$dtiextra")
+        local dtibids
+        dtibids=$(resolve_bids_infix "${DTI_BIDS_INFIX:-}" "${DTI_SPACE_LABEL:-mni}" "${DTI_EXTRA_TAGS:-}" "${DTI_ACQ_LABEL:-dti}")
+        candidate=$(name_subject_file "$sub" "$visit" "$dtisuffix" "$dtibids" "$desc" "$DTI_COMPRESSED")
         search_dir="$NII_DIR_DTI"
         ;;
     structural)
-        local structspace=${STRUCTURAL_SPACE_LABEL:-mni}
-        local structextra=${STRUCTURAL_EXTRA_TAGS:-}
         local structsuffix=${STRUCTURAL_DATA_SUFFIX:-T1w}
-        local structacq=${STRUCTURAL_ACQ_LABEL:-memprage}
-        candidate=$(name_subject_file "$sub" "$visit" "$structsuffix" "$structacq" "$desc" "$STRUCTURAL_COMPRESSED" "$structspace" "$structextra")
+        local structbids
+        structbids=$(resolve_bids_infix "${STRUCTURAL_BIDS_INFIX:-}" "${STRUCTURAL_SPACE_LABEL:-mni}" "${STRUCTURAL_EXTRA_TAGS:-}" "${STRUCTURAL_ACQ_LABEL:-memprage}")
+        candidate=$(name_subject_file "$sub" "$visit" "$structsuffix" "$structbids" "$desc" "$STRUCTURAL_COMPRESSED")
         search_dir="$NII_DIR_STRUCTURAL"
         ;;
     esac
@@ -1140,9 +1180,8 @@ collect_and_confirm_inputs_dti() {
             fi
         done
 
-        prompt_for_value "DTI_SPACE_LABEL" "What is the value after space- in your file names for DTI data ?" "mni"
-        prompt_for_value "DTI_EXTRA_TAGS" "List additional BIDS tags (ex: res-3.0mm) to insert after space (separate with spaces, leave blank for none)" ""
-        prompt_for_value "DTI_ACQ_LABEL" "Global pattern between space- and desc- in your DTI filenames (ex: dti)" "dti"
+        prompt_for_value "DTI_BIDS_INFIX" "BIDS tags between sub-..._ses-... and desc- in your DTI filenames (ex: space-mni_acq-dti)" "space-mni_acq-dti"
+        config_values[DTI_BIDS_INFIX]=$(normalize_bids_infix "${config_values[DTI_BIDS_INFIX]}")
         prompt_for_value "DTI_DATA_SUFFIX" "Suffix after desc-..._ in your DTI filenames (ex: dwi)" "dwi"
 
         echo "WARNING : gFA files are maybe named wierdly by me... Feel free to change the script in further use if needed"
@@ -1170,19 +1209,15 @@ find_files() {
 
     local input_dir=$1
     local data_type=$2
-    local acquisition=$3
+    local bids_infix=$3
     local description=$4
     local compressed=$5
-    local space_label=${6:-mni}
-    local extra_tags=${7:-}
 
     input_dir=$(trim_whitespace "$input_dir")
     data_type=$(trim_whitespace "$data_type")
-    acquisition=$(trim_whitespace "$acquisition")
+    bids_infix=$(normalize_bids_infix "$bids_infix")
     description=$(trim_whitespace "$description")
     compressed=$(trim_whitespace "$compressed")
-    space_label=$(trim_whitespace "$space_label")
-    extra_tags=$(trim_whitespace "$extra_tags")
 
     SUBJECTS=($(cat $LIST_ALL_SUBJECTS))
     # Variable to register modality if all files are found
@@ -1212,7 +1247,7 @@ find_files() {
             #     cd ${input_dir}/${subject}
             # fi
 
-            file_path=$(name_subject_file "${sub}" "${visit}" "${data_type}" "${acquisition}" "${description}" "${compressed}" "${space_label}" "${extra_tags}")
+            file_path=$(name_subject_file "${sub}" "${visit}" "${data_type}" "${bids_infix}" "${description}" "${compressed}")
             #echo "$file_path"
 
             if [[ $? -ne 0 ]]; then
@@ -1258,16 +1293,15 @@ dti_do() {
     cd $GLOBAL_DIR
     source config_dti.sh
 
-    local dtispace=${DTI_SPACE_LABEL:-mni}
-    local dtiextra=${DTI_EXTRA_TAGS:-}
-    local dtiacq=${DTI_ACQ_LABEL:-dti}
     local dtisuffix=${DTI_DATA_SUFFIX:-dwi}
+    local dtibids
+    dtibids=$(resolve_bids_infix "${DTI_BIDS_INFIX:-}" "${DTI_SPACE_LABEL:-mni}" "${DTI_EXTRA_TAGS:-}" "${DTI_ACQ_LABEL:-dti}")
 
     DTI_FILES_VALIDATED=()
     for file_dti in ${FILES_DTI[@]}; do
         check_for_file=""
         not_found=()
-        check_for_file=$(find_files "${NII_DIR_DTI}" "${dtisuffix}" "${dtiacq}" "${file_dti}" "${DTI_COMPRESSED}" "${dtispace}" "${dtiextra}")
+        check_for_file=$(find_files "${NII_DIR_DTI}" "${dtisuffix}" "${dtibids}" "${file_dti}" "${DTI_COMPRESSED}")
         if [[ $check_for_file == "false" ]]; then
             echo "$file_dti is missing some subjects. Will not be registrated as validated file"
             echo "${not_found[@]}"
@@ -1324,9 +1358,8 @@ collect_and_confirm_inputs_structural() {
             fi
         done
 
-        prompt_for_value "STRUCTURAL_SPACE_LABEL" "What is the value after space- in your file names for STRUCTURAL data ?" "mni"
-        prompt_for_value "STRUCTURAL_EXTRA_TAGS" "List additional BIDS tags (ex: res-3.0mm) to insert after space (separate with spaces, leave blank for none)" ""
-        prompt_for_value "STRUCTURAL_ACQ_LABEL" "Global pattern between space- and desc- in your STRUCTURAL filenames (ex: memprage)" "memprage"
+        prompt_for_value "STRUCTURAL_BIDS_INFIX" "BIDS tags between sub-..._ses-... and desc- in your STRUCTURAL filenames (ex: space-mni_acq-memprage)" "space-mni_acq-memprage"
+        config_values[STRUCTURAL_BIDS_INFIX]=$(normalize_bids_infix "${config_values[STRUCTURAL_BIDS_INFIX]}")
         prompt_for_value "STRUCTURAL_DATA_SUFFIX" "Suffix after desc-..._ in your STRUCTURAL filenames (ex: T1w)" "T1w"
 
         read -p "By default, the processed files that will be processed are : mwp1, mwp2, wp1, wp2 (Following CAT12 nomenclature). If you want to change this list, please answer yes. Any other answer will continue. Answer : " input
@@ -1368,16 +1401,15 @@ structural_do() {
     cd $GLOBAL_DIR
     source config_structural.sh
 
-    local structspace=${STRUCTURAL_SPACE_LABEL:-mni}
-    local structextra=${STRUCTURAL_EXTRA_TAGS:-}
-    local structacq=${STRUCTURAL_ACQ_LABEL:-memprage}
     local structsuffix=${STRUCTURAL_DATA_SUFFIX:-T1w}
+    local structbids
+    structbids=$(resolve_bids_infix "${STRUCTURAL_BIDS_INFIX:-}" "${STRUCTURAL_SPACE_LABEL:-mni}" "${STRUCTURAL_EXTRA_TAGS:-}" "${STRUCTURAL_ACQ_LABEL:-memprage}")
 
     STRUCTURAL_FILES_VALIDATED=()
     for file_structural in ${FILES_STRUCTURAL[@]}; do
         check_for_file=""
         not_found=""
-        check_for_file=$(find_files "${NII_DIR_STRUCTURAL}" "${structsuffix}" "${structacq}" "${file_structural}" "${STRUCTURAL_COMPRESSED}" "${structspace}" "${structextra}")
+        check_for_file=$(find_files "${NII_DIR_STRUCTURAL}" "${structsuffix}" "${structbids}" "${file_structural}" "${STRUCTURAL_COMPRESSED}")
         #echo "$check_for_file"
         #declare -p check_for_file
         if [[ "$(echo -n "${check_for_file}")" == "false" ]]; then
@@ -1419,9 +1451,10 @@ echo "================================="
 echo "Hi ! Let's create and organize the files you need ! :-)"
 echo "First, are you sure that your files are named correctly."
 echo "Structure that we want : "
-echo "sub: subject ; ses : session/visit, if only one put V1 ; space : original, MNI152, etc... ; acq : acquisition which is the specificity of how the MRI worked, desc : description of the file (more liberal ^^)"
-echo "Example 1 : sub-SUBJECT_ses-SESSION_space-MNI_acq-ACQUISITION_desc-MET_spectroscopy.nii.gz"
-echo "Example 2 : sub-SUBJECT_space-MNI_acq-memperage_desc-mwp1_T1.nii.gz"
+echo "sub: subject ; ses : session/visit, if only one put V1 ; desc : description of the file (more liberal ^^)"
+echo "For DTI and structural files, VLAD will ask for the full BIDS tag block between sub-SUBJECT_ses-SESSION and desc-DESCRIPTION."
+echo "Example 1 : sub-SUBJECT_ses-SESSION_space-MNI_acq-ACQUISITION_desc-gFA_dwi.nii.gz"
+echo "Example 2 : sub-SUBJECT_ses-SESSION_space-MNI_acq-memprage_desc-mwp1_T1w.nii.gz"
 read -p " If they are not in this structure, answer exit and use the examples provided to rename your files in the most standard way possible to be able to continue further. Anything else will continue.  " answer
 if [[ $answer == "exit" ]]; then
     echo "Well good luck and see you soon here. Tip : pompt chatGPT or Claude with the current structure of your files and the structure you want to have, it will do the script(s) :-)"

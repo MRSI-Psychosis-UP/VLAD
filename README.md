@@ -184,6 +184,30 @@ sub-001_ses-V1_space-mni_desc-snr_mrsi.nii.gz
 sub-001_ses-V1_space-mni_desc-fwhm_mrsi.nii.gz
 ```
 
+DTI and structural setup use one `*_BIDS_INFIX` value for the BIDS tags between `sub-SUBJECT_ses-VISIT` and `desc-DESCRIPTION`. Enter it without leading or trailing underscores; the script also accepts and normalizes them.
+
+Expected DTI and structural filenames are:
+
+```text
+sub-SUBJECT_ses-VISIT_<BIDS_INFIX>_desc-DESCRIPTION_<SUFFIX>.nii.gz
+```
+
+Defaults:
+
+```text
+DTI_BIDS_INFIX=space-mni_acq-dti
+DTI_DATA_SUFFIX=dwi
+STRUCTURAL_BIDS_INFIX=space-mni_acq-memprage
+STRUCTURAL_DATA_SUFFIX=T1w
+```
+
+Examples:
+
+```text
+sub-001_ses-V1_space-mni_acq-dti_desc-gFA_dwi.nii.gz
+sub-001_ses-V1_space-mni_acq-memprage_desc-mwp1_T1w.nii.gz
+```
+
 During MRSI preparation, VLAD validates the expected files, creates derived sum/ratio/quotient maps, and creates subject-level quality masks using SNR, FWHM, and CRLB. Missing files are reported in `GLOBAL_DIR/not_found.txt`.
 
 The preparation script creates:
@@ -304,7 +328,7 @@ Prepare now and queue the analysis for later:
 - `--mask onlygrey`, `--mask onlywhite`, `--mask onlygreydetail`, or `--mask cerebellum`: narrower mask presets.
 - `--qualithresh 50`: require at least 50 percent of subjects to have valid quality mask coverage in a voxel. Default is `68`.
 - `--cards`: force recreation of 4D cards. Optionally pass a card suffix after it.
-- `--smooth [sigma]`: create smoothed 4D cards. Default sigma is `1` if no value is given.
+- `--smooth [sigma]`: create smoothed 4D cards, including MRSI cards. Smoothing is applied before the analysis quality/tissue mask; default sigma is `1`.
 - `--logarithm`: apply log transform before Randomise or SwE.
 - `-p 500`: number of permutations. Default is `300`.
 - `--noparallel`: use `randomise` instead of `randomise_parallel`.

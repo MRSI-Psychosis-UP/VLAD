@@ -108,6 +108,54 @@ trim_whitespace() {
     printf '%s' "$str"
 }
 
+normalize_bids_infix() {
+    local infix
+    infix=$(trim_whitespace "$1")
+
+    while [[ "$infix" == _* ]]; do
+        infix="${infix#_}"
+    done
+    while [[ "$infix" == *_ ]]; do
+        infix="${infix%_}"
+    done
+
+    printf '%s' "$infix"
+}
+
+build_bids_infix_from_parts() {
+    local space_label
+    local extra_tags
+    local acquisition
+    local infix
+
+    space_label=$(trim_whitespace "${1:-mni}")
+    extra_tags=$(trim_whitespace "${2:-}")
+    acquisition=$(trim_whitespace "${3:-}")
+
+    infix="space-${space_label}"
+    if [[ -n "$extra_tags" ]]; then
+        for tag in $extra_tags; do
+            infix+="_${tag}"
+        done
+    fi
+    if [[ -n "$acquisition" ]]; then
+        infix+="_acq-${acquisition}"
+    fi
+
+    normalize_bids_infix "$infix"
+}
+
+resolve_bids_infix() {
+    local explicit_infix
+    explicit_infix=$(normalize_bids_infix "${1:-}")
+
+    if [[ -n "$explicit_infix" ]]; then
+        printf '%s' "$explicit_infix"
+    else
+        build_bids_infix_from_parts "${2:-mni}" "${3:-}" "${4:-}"
+    fi
+}
+
 SCRIPT_ABS_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 ORIGINAL_ARGS=("$@")
 
@@ -319,9 +367,9 @@ display_help() {
     echo ""
     echo "  -p, --perm <value>	     Number of permutations By default 300"
     echo "  --cards	[value]          Will force to do the 4D cards. This option also permits to use a different suffix than the default \"filled\" for cards. Just add an argument after it :-). If empty, will do the filled."
-    echo "  --mask <value>           Do randomise with a grey matter and white matter mask (on top of a global mask): possible values : wmgm (white and total grey matter) / wmgmbg (same but grey matter separated in cortical and basal ganglia)"
+    echo "  --mask <value>           Do randomise with a grey matter and white matter mask (on top of a global mask): possible values : wmgm (white and total grey matter) / wmgmbg (same but grey matter separated in cortical and basal ganglia) / onlygrey (only GM) / onlywhite (only WM) / cerebellum (GM+WM+cerebellum) / onlygreydetail (GM separated in cortical and basal ganglia)"
     echo "  --qualithresh <value>    Quality threshold (%of subject) to mask the WM_GM / WM / GM masks on analysis (put the %age of subject, for eg if 50%, put --qualithresh 50)"
-    echo "  --smooth                 Force smoothing of cards. Specify the smoothing as the sigma after it, Default = 1 if nothing specified. One 4D card by smoothing sigma will be made"
+    echo "  --smooth                 Force smoothing of cards before analysis masking, including MRSI. Specify sigma after it; default = 1."
     echo "  --logarithm              Apply logarithm to the data before randomise"
     echo ""
     echo "  -l, --longitudinal <value> If you are doing a longitudinal analysis. Currently in work. Argument : swe or afni depending on the tool you want to use."
@@ -331,7 +379,8 @@ display_help() {
     echo "                           value : little for increasing the number of permutation only and disable the warnings. masked for masking each subject with it qmask"
     echo "                           If you have a doubt : little is ok for DTI and structural. Masked only for hardcore confirmation with MRSI"
     echo "  -cm, --confirmation_M    Create what is necessary to run a confirmation analysis with masked values depending on the qmask"
-    #echo "  --difflipid              If you have different lipid suppression. Will remind you to put it in the matrix and will select a different folder to find the maps"
+    echo "  --onlyoriginal           Only useful for MRSI : will take the in the significant cluster x by individual qmask and not pop qmask"
+    #echo "  --difflipid             If you have different lipid suppression. Will remind you to put it in the matrix and will select a different folder to find the maps"
     echo "  --remakeall              Delete the folders associated with the name in Cartes4D/, Results/ and the List"
     echo "  --prepare                Do only the preparation of analysis : List of subjects, Matrix and 4D card. If -cm is specified, it will also do it."
     echo "  --analyze                Do only the analysis part : checking for the Randomise results and doing the sum-up with R"
@@ -386,6 +435,7 @@ SUMUP=true
 
 SPACE_LABEL_SETTING="mni"
 EXTRA_TAGS_SETTING=""
+BIDS_INFIX_SETTING=""
 
 #mrsi_maps_dir="${lipid08_maps}"
 #DIFFLIPID=false -> disabled for now
@@ -620,6 +670,10 @@ while [[ $# -gt 0 ]]; do
         ;;
     -cm | --confirmation_M)
         CONFIRMATION_MASKS=true
+        shift
+        ;;
+    --onlyoriginal)
+        ONLYORIGINAL=true
         shift
         ;;
     --cards)
@@ -977,15 +1031,12 @@ dti)
         COMPRESSION=""
     fi
 
-    SPACE_LABEL_SETTING=$(trim_whitespace "${DTI_SPACE_LABEL:-mni}")
-    EXTRA_TAGS_SETTING=$(trim_whitespace "${DTI_EXTRA_TAGS:-}")
     local dti_data_suffix
     dti_data_suffix=$(trim_whitespace "${DTI_DATA_SUFFIX:-dwi}")
-    local dti_acq_label
-    dti_acq_label=$(trim_whitespace "${DTI_ACQ_LABEL:-dti}")
+    BIDS_INFIX_SETTING=$(resolve_bids_infix "${DTI_BIDS_INFIX:-}" "${DTI_SPACE_LABEL:-mni}" "${DTI_EXTRA_TAGS:-}" "${DTI_ACQ_LABEL:-dti}")
 
     data_type="${dti_data_suffix}"
-    acquisition="${dti_acq_label}"
+    acquisition="${BIDS_INFIX_SETTING}"
     SMOOTHINGCARDS=true
 
     if [[ -z ${DESCRIPTION} ]]; then
@@ -1020,15 +1071,12 @@ structural)
         COMPRESSION=""
     fi
 
-    SPACE_LABEL_SETTING=$(trim_whitespace "${STRUCTURAL_SPACE_LABEL:-mni}")
-    EXTRA_TAGS_SETTING=$(trim_whitespace "${STRUCTURAL_EXTRA_TAGS:-}")
-    local struct_acq_label
-    struct_acq_label=$(trim_whitespace "${STRUCTURAL_ACQ_LABEL:-memprage}")
     local struct_data_suffix
     struct_data_suffix=$(trim_whitespace "${STRUCTURAL_DATA_SUFFIX:-T1w}")
+    BIDS_INFIX_SETTING=$(resolve_bids_infix "${STRUCTURAL_BIDS_INFIX:-}" "${STRUCTURAL_SPACE_LABEL:-mni}" "${STRUCTURAL_EXTRA_TAGS:-}" "${STRUCTURAL_ACQ_LABEL:-memprage}")
 
     data_type="${struct_data_suffix}"
-    acquisition="${struct_acq_label}"
+    acquisition="${BIDS_INFIX_SETTING}"
 
     if [[ -z ${DESCRIPTION} ]]; then
         TODO=(${STRUCTURAL_FILES_VALIDATED[@]})
@@ -1301,8 +1349,18 @@ domatrix() {
 checkmatrix_4d() {
 
     local CARD4Dtocheck=$1
+    local card_path="${GLOBAL_DIR}/Cartes4D/${NAME}/${CARD4Dtocheck}"
 
-    check4D=$(fslval "${GLOBAL_DIR}/Cartes4D/${NAME}/${CARD4Dtocheck}" dim4)
+    if [[ ! -f "${card_path}" ]]; then
+        echo "4D card for matrix compatibility check not found: ${card_path}"
+        exit 1
+    fi
+
+    check4D=$(fslval "${card_path}" dim4)
+    if [[ -z "${check4D}" ]]; then
+        echo "Unable to read dim4 from 4D card for matrix compatibility check: ${card_path}"
+        exit 1
+    fi
     value=$(grep '/NumPoints' ${GLOBAL_DIR}/Results/${NAME}/${MATRIX}.mat | awk '{print $2}')
     #echo "$value"
 
@@ -1352,29 +1410,27 @@ name_subject_file() {
     local subject=$1
     local visit=$2
     local data_type=$3
-    local acquisition=$4
+    local bids_infix=$4
     local description=$5
     local compressed=$6
-    local space_label=${7:-${SPACE_LABEL_SETTING:-mni}}
-    local extra_tags=${8:-${EXTRA_TAGS_SETTING:-}}
     subject=$(trim_whitespace "$subject")
     visit=$(trim_whitespace "$visit")
     data_type=$(trim_whitespace "$data_type")
-    acquisition=$(trim_whitespace "$acquisition")
+    bids_infix=$(normalize_bids_infix "$bids_infix")
     description=$(trim_whitespace "$description")
     compressed=$(trim_whitespace "$compressed")
-    space_label=$(trim_whitespace "$space_label")
-    extra_tags=$(trim_whitespace "$extra_tags")
 
-    if [[ $# -lt 6 || $# -gt 8 ]]; then
+    if [[ $# -ne 6 ]]; then
         echo "name_subject_file badly used, this will cause some errors. Exiting"
         return 1
     fi
 
-    local tag_suffix
-    tag_suffix=$(build_space_suffix "$space_label" "$extra_tags")
+    local tag_suffix=""
+    if [[ -n "$bids_infix" ]]; then
+        tag_suffix="_${bids_infix}"
+    fi
 
-    echo "sub-${subject}_ses-${visit}${tag_suffix}_acq-${acquisition}_desc-${description}_${data_type}.nii${compressed}"
+    echo "sub-${subject}_ses-${visit}${tag_suffix}_desc-${description}_${data_type}.nii${compressed}"
 
 }
 
@@ -1408,27 +1464,25 @@ name_subject_file_mrsi() { # ADDED FOR THE NEW BIDS
 
 name_4d_file() {
     local data_type=$1
-    local acquisition=$2
+    local bids_infix=$2
     local description=$3
     local name=$4
-    local space_label=${5:-${SPACE_LABEL_SETTING:-mni}}
-    local extra_tags=${6:-${EXTRA_TAGS_SETTING:-}}
     data_type=$(trim_whitespace "$data_type")
-    acquisition=$(trim_whitespace "$acquisition")
+    bids_infix=$(normalize_bids_infix "$bids_infix")
     description=$(trim_whitespace "$description")
     name=$(trim_whitespace "$name")
-    space_label=$(trim_whitespace "$space_label")
-    extra_tags=$(trim_whitespace "$extra_tags")
 
-    if [[ $# -lt 4 || $# -gt 6 ]]; then
+    if [[ $# -ne 4 ]]; then
         echo "name_4d_file badly used, this will cause some errors. Exiting"
         return 1
     fi
 
-    local tag_suffix
-    tag_suffix=$(build_space_suffix "$space_label" "$extra_tags")
+    local tag_suffix=""
+    if [[ -n "$bids_infix" ]]; then
+        tag_suffix="_${bids_infix}"
+    fi
 
-    echo "4D_${name}${tag_suffix}_acq-${acquisition}_desc-${description}_${data_type}.nii.gz"
+    echo "4D_${name}${tag_suffix}_desc-${description}_${data_type}.nii.gz"
 
 }
 
@@ -1462,14 +1516,55 @@ resolve_analysis_4d_cards() {
     local met="$1"
 
     if [[ ${type_images} == "mrsi" ]]; then
-        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${met}" "${acquisition}" "${NAME}") || return 1
-        CARD4D=$(name_4d_file_mrsi "${data_type}" "${met}" "${acquisition}-temp" "${NAME}") || return 1
+        local mrsi_description
+        mrsi_description=$(mrsi_analysis_description "${acquisition}") || return 1
+        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${met}" "${mrsi_description}" "${NAME}") || return 1
+        CARD4D=$(name_4d_file_mrsi "${data_type}" "${met}" "${mrsi_description}-temp" "${NAME}") || return 1
     elif [[ ${SMOOTHINGCARDS} == false ]]; then
         OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${met}" "${NAME}") || return 1
         CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${met}" "${NAME}") || return 1
     else
         OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${met}-smooth${SMOOTHSIGMA}" "${NAME}") || return 1
         CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${met}-smooth${SMOOTHSIGMA}" "${NAME}") || return 1
+    fi
+}
+
+mrsi_analysis_description() {
+    local description="$1"
+
+    if [[ ${type_images} == "mrsi" && ${SMOOTHINGCARDS} == true ]]; then
+        echo "${description}-smooth${SMOOTHSIGMA}"
+    else
+        echo "${description}"
+    fi
+}
+
+analysis_run_label() {
+    local label="$1"
+
+    if [[ ${type_images} == "mrsi" && ${SMOOTHINGCARDS} == true ]]; then
+        echo "${label}_smooth${SMOOTHSIGMA}"
+    else
+        echo "${label}"
+    fi
+}
+
+confirmation_mask_dir() {
+    local met="$1"
+    local mask="$2"
+    local run_label
+
+    run_label=$(analysis_run_label "${acquisition}") || return 1
+    echo "${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${met}_${run_label}_${mask}"
+}
+
+resolve_matrix_check_4d_card() {
+    local met="$1"
+
+    if [[ ${type_images} == "mrsi" ]]; then
+        CHECKCARD4D=$(name_4d_file_mrsi "${data_type}" "${met}" "${acquisition}" "${NAME}") || return 1
+    else
+        CHECKCARD4D="${OrigCARD4D}"
     fi
 }
 
@@ -1685,10 +1780,17 @@ wrap4dcards() { # This needs to be more flexible...
     fslmerge -t ${card4dtodo} *-${cardtodo}.nii${COMPRESSION}
 
     if [[ ${SMOOTHINGCARDS} == true ]]; then
-        cardtodoS="${cardtodo}-smooth${SMOOTHSIGMA}"
-        card4dsmoothed=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodoS}" "${NAME}")
+        if [[ ${type_images} == "mrsi" ]]; then
+            carddescriptionS=$(mrsi_analysis_description "${acquisition}")
+            card4dsmoothed=$(name_4d_file_mrsi "${data_type}" "${cardtodo}" "${carddescriptionS}" "${NAME}")
+        else
+            cardtodoS="${cardtodo}-smooth${SMOOTHSIGMA}"
+            card4dsmoothed=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodoS}" "${NAME}")
+        fi
         fslmaths ${card4dtodo} -s ${SMOOTHSIGMA} ${card4dsmoothed}
-        rm -f ${card4dtodo}
+        if [[ ${type_images} != "mrsi" ]]; then
+            rm -f ${card4dtodo}
+        fi
     fi
 
     rm -f *-${cardtodo}.nii${COMPRESSION}
@@ -1797,7 +1899,7 @@ unique_masking() { # Must be adapted
         exit 1 # Exit script if the function returns an error
     fi
 
-    DIR_CM="${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/"
+    DIR_CM="$(confirmation_mask_dir "${MET}" "${MASK}")/"
     mkdir -p $DIR_CM
     cd $DIR_CM
     # Making the inverted qmasks for masking the bad quality voxels for randomise
@@ -1856,6 +1958,9 @@ randoanalyze() {
     local MET="$2"
     local RESULT="$3"
     local CARD4Dtoanalyze="$4"
+    local RUN_LABEL
+
+    RUN_LABEL=$(analysis_run_label "${acquisition}") || return 1
 
     if [[ ${ONLYORIGINAL} != true ]]; then
         if [[ -z "${CARD4Dtoanalyze}" ]]; then
@@ -1935,18 +2040,18 @@ randoanalyze() {
         read min max <min_max.txt
         #Extracting mean value from significative contrasts
         if (($(echo "$max > 0.95" | bc -l))); then
-            fslmaths "${stats_file}" -thr 0.95 -bin thresh_mask_${acquisition}_${MASK}_contrast${i}
+            fslmaths "${stats_file}" -thr 0.95 -bin thresh_mask_${RUN_LABEL}_${MASK}_contrast${i}
             #======Verify the name of the 4D card later======
 
             #Info in the sum-up for the analysis
 
-            echo "####For ${MET}, the contrast ${i} in ${acquisition} in ${MASK} region is significative (p =< 0.05)####" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "####For ${MET}, the contrast ${i} in ${RUN_LABEL} in ${MASK} region is significative (p =< 0.05)####" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
-            echo "####For ${MET}, the contrast ${i} in ${acquisition} in ${MASK} region is significative (p =< 0.05)####"
+            echo "####For ${MET}, the contrast ${i} in ${RUN_LABEL} in ${MASK} region is significative (p =< 0.05)####"
             echo "====Running data extraction + image making on this modality===="
 
             # Extract mean values only on voxels with good quality
-            MEANTS="meants__${NAME}__${MET}__${MATRIX}__${acquisition}__${MASK}__contrast${i}.txt"
+            MEANTS="meants__${NAME}__${MET}__${MATRIX}__${RUN_LABEL}__${MASK}__contrast${i}.txt"
             if [[ ${ONLYORIGINAL} == true ]]; then
 
                 if [[ -e "${MEANTS}" ]]; then
@@ -2001,7 +2106,7 @@ randoanalyze() {
                     temp_log="${PWD}/log-${sub}-${visit}-${MET}-${i}.nii.gz"
 
                     # MASKING
-                    if ! fslmaths "${FILE_PATH_qmask}" -mul "thresh_mask_${acquisition}_${MASK}_contrast${i}" "${temp_mask}"; then
+                    if ! fslmaths "${FILE_PATH_qmask}" -mul "thresh_mask_${RUN_LABEL}_${MASK}_contrast${i}" "${temp_mask}"; then
                         echo "Unable to create the subject quality mask for ${SUBJ}. Exiting."
                         rm -f "${temp_mask}" "${temp_log}"
                         return 1
@@ -2033,16 +2138,16 @@ randoanalyze() {
 
                 done
 
-                echo "Meants extracted for quality voxels on clusters with p < 0.05 for ${MET} in contrast ${i} on modality ${SUFFIX} in ${MASK} region, only in \"original\" voxels" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+                echo "Meants extracted for quality voxels on clusters with p < 0.05 for ${MET} in contrast ${i} on modality ${RUN_LABEL} in ${MASK} region, only in \"original\" voxels" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
             else
                 if [[ -e "${MEANTS}" ]]; then
                     rm -f "${MEANTS}"
                 fi
 
-                fslmeants -i "${CARD4Dtoanalyze}" -m "thresh_mask_${acquisition}_${MASK}_contrast${i}" -o "${MEANTS}"
+                fslmeants -i "${CARD4Dtoanalyze}" -m "thresh_mask_${RUN_LABEL}_${MASK}_contrast${i}" -o "${MEANTS}"
 
-                echo "Meants extracted on clusters with p < 0.05 for ${MET} in contrast ${i} on modality ${SUFFIX} in ${MASK} region" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+                echo "Meants extracted on clusters with p < 0.05 for ${MET} in contrast ${i} on modality ${RUN_LABEL} in ${MASK} region" >>../../Result_randomise_${NAME}_${MATRIX}.txt
             fi
 
             # Add the path of the .txt file to the global file for R
@@ -2050,7 +2155,7 @@ randoanalyze() {
 
             # Creating the image of this significative analysis
             PATH_IMAGE="${GLOBAL_DIR}/Results/${NAME}/${MET}/${MATRIX}/${stats_file}"
-            NAME_IMAGE="${MET}__${MATRIX}__${acquisition}__${MASK}__contrast${i}.png"
+            NAME_IMAGE="${MET}__${MATRIX}__${RUN_LABEL}__${MASK}__contrast${i}.png"
 
             if (( i % 2 == 0 )); then
                 colormap=2
@@ -2061,9 +2166,9 @@ randoanalyze() {
 
 
         elif (($(echo "$max > 0.90" | bc -l))); then
-            echo "####For ${MET}, the contrast ${i} in modality ${SUFFIX} in ${MASK} region is neer significance (p =< 0.1)####" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "####For ${MET}, the contrast ${i} in modality ${RUN_LABEL} in ${MASK} region is neer significance (p =< 0.1)####" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
-            echo "####For ${MET}, the contrast ${i} in modality ${SUFFIX} in ${MASK} region is neer significance (p =< 0.1) ####"
+            echo "####For ${MET}, the contrast ${i} in modality ${RUN_LABEL} in ${MASK} region is neer significance (p =< 0.1) ####"
 
         fi
 
@@ -2080,6 +2185,9 @@ randoextract() {
     MASK="$1"
     MET="$2"
     RESULT="$3"
+    local RUN_LABEL
+
+    RUN_LABEL=$(analysis_run_label "${acquisition}") || exit 1
 
     # Checking for the suffix to see which metabolites we will to do here
     # if [[ ${SUFFIX} == "filled" || ${SUFFIX} == "basic" || ${SUFFIX} == "conc" ]]; then
@@ -2093,7 +2201,7 @@ randoextract() {
 
     #for MET in ${TODO[@]}; do # We are keeping MET for the moment but it will accomodates with the dti and structural
     echo "======================================================================================================================================"
-    echo "===Randomise ${MET} using ${MATRIX} matrix TFCE ${NBPERMUT} times for ${acquisition} modality in ${MASK}===="
+    echo "===Randomise ${MET} using ${MATRIX} matrix TFCE ${NBPERMUT} times for ${RUN_LABEL} modality in ${MASK}===="
     echo "======================================================================================================================================"
 
     echo "Initializing..."
@@ -2111,42 +2219,18 @@ randoextract() {
 
     CARD4D_path="${GLOBAL_DIR}/Cartes4D/${NAME}"
 
-    if [[ ${METQUOTIENT} == false && ${type_images} == "mrsi" ]]; then # SI MRSI et pas quotient
-        QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${met_quali}_${NAME}mask${MASK}_quali.nii.gz"
-        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
-            echo "An error occurred while running name_4d_file. Exiting script."
-            exit 1 # Exit script if the function returns an error
-        fi
-        CARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}-temp" "${NAME}")
-        #CARD4D_path="${GLOBAL_DIR}/Cartes4D/${NAME}/"
-    elif [[ ${METQUOTIENT} == true && ${type_images} == "mrsi" ]]; then # SI MRSI et quotient -> utilisation du Qmask summetabs (sinon on s'en sort pas)
-        QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${SUM_METAB_LABEL}_${NAME}mask${MASK}_quali.nii.gz"
-        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
-            echo "An error occurred while running name_4d_file. Exiting script."
-            exit 1 # Exit script if the function returns an error
-        fi
-        CARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}-temp" "${NAME}")
+    if ! resolve_analysis_4d_cards "${MET}"; then
+        echo "Unable to determine the 4D card names for ${MET}. Exiting script."
+        exit 1
+    fi
 
-    elif [[ ${type_images} != "mrsi" ]]; then
-        if [[ ${SMOOTHINGCARDS} == false ]]; then #SI pas de Smoothing
-
-            OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${MET}" "${NAME}")
-            if [[ $? -ne 0 ]]; then
-                echo "An error occurred while running name_4d_file. Exiting script."
-                exit 1 # Exit script if the function returns an error
-            fi
-            CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${MET}" "${NAME}")
-
-        else # SI smoothing (mis automatiquement pour le DTI : valeur du smooth par défaut pour le DTI)
-            OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${MET}-smooth${SMOOTHSIGMA}" "${NAME}")
-            if [[ $? -ne 0 ]]; then
-                echo "An error occurred while running name_4d_file. Exiting script."
-                exit 1 # Exit script if the function returns an error
-            fi
-            CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${MET}-smooth${SMOOTHSIGMA}" "${NAME}")
+    if [[ ${type_images} == "mrsi" ]]; then
+        if [[ ${METQUOTIENT} == false ]]; then
+            QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${met_quali}_${NAME}mask${MASK}_quali.nii.gz"
+        else
+            QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${SUM_METAB_LABEL}_${NAME}mask${MASK}_quali.nii.gz"
         fi
+    else
         if [[ ${type_images} == "dti" ]]; then
             QUALIMASK=$(get_mask_file_path "FA_2500.nii.gz" "dti")
             if [[ -z "$QUALIMASK" ]]; then
@@ -2162,10 +2246,6 @@ randoextract() {
             fi
             QUALIMASK="${mask_file}"
         fi
-
-    else
-        echo "I don't know where we are but there seems to be an error while loading files for Randomise"
-        exit 1
     fi
 
     #cd $MET
@@ -2177,7 +2257,8 @@ randoextract() {
     # Doing specific masking if required
 
     if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then
-        if [[ -e ${MATRIX}-CM.mat && -e ${MATRIX}-CM.con && -e ${MATRIX}-CM.nii.gz ]]; then
+        CM_DIR=$(confirmation_mask_dir "${MET}" "${MASK}") || exit 1
+        if [[ -e ${CM_DIR}/${MATRIX}-CM.mat && -e ${CM_DIR}/${MATRIX}-CM.con && -e ${CM_DIR}/${MATRIX}-CM.nii.gz ]]; then
             echo "Specific masking for subject and appropriate matrix found. Proceeding."
         else
             unique_masking
@@ -2219,29 +2300,29 @@ randoextract() {
         if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then # CHANGER SUFFIXE ?
 
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}_CM"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.mat -t ${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.con --vxl=-"${num_waves}" --vxf="${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T
             wait
-            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${acquisition} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
         else
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}"
             randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -m ${QUALIMASK} -n ${NBPERMUT} -T
             wait
-            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${acquisition} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
         fi
     else
         if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then
 
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}_CM"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.mat -t ${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.con -f ../../${MATRIX}.fts --vxl=-"${num_waves}" --vxf="${GLOBAL_DIR}/Results/ConfirmationMasked/${NAME}_${MATRIX}_${MET}_${acquisition}_${MASK}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con -f ../../${MATRIX}.fts --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly
             wait
-            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${acquisition} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
         else
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}"
             randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -f ../../${MATRIX}.fts -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly
             wait
-            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${acquisition} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+            echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
         fi
     fi
 
@@ -2263,9 +2344,12 @@ sweprocess() {
     MASK="$1"
     MET="$2"
     RESULT="$3"
+    local RUN_LABEL
+
+    RUN_LABEL=$(analysis_run_label "${acquisition}") || exit 1
 
     echo "======================================================================================================================================"
-    echo "===== SWE ${MET} using ${MATRIX} matrix TFCE ${NBPERMUT} times for ${acquisition} modality in ${MASK}===="
+    echo "===== SWE ${MET} using ${MATRIX} matrix TFCE ${NBPERMUT} times for ${RUN_LABEL} modality in ${MASK}===="
     echo "======================================================================================================================================"
 
     echo "Initializing..."
@@ -2283,42 +2367,18 @@ sweprocess() {
 
     CARD4D_path="${GLOBAL_DIR}/Cartes4D/${NAME}"
 
-    if [[ ${METQUOTIENT} == false && ${type_images} == "mrsi" ]]; then # SI MRSI et pas quotient
-        QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${met_quali}_${NAME}mask${MASK}_quali.nii.gz"
-        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
-            echo "An error occurred while running name_4d_file. Exiting script."
-            exit 1 # Exit script if the function returns an error
-        fi
-        CARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}-temp" "${NAME}")
-        #CARD4D_path="${GLOBAL_DIR}/Cartes4D/${NAME}/"
-    elif [[ ${METQUOTIENT} == true && ${type_images} == "mrsi" ]]; then # SI MRSI et quotient -> utilisation du Qmask summetabs (sinon on s'en sort pas)
-        QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${SUM_METAB_LABEL}_${NAME}mask${MASK}_quali.nii.gz"
-        OrigCARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
-            echo "An error occurred while running name_4d_file. Exiting script."
-            exit 1 # Exit script if the function returns an error
-        fi
-        CARD4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${acquisition}-temp" "${NAME}")
+    if ! resolve_analysis_4d_cards "${MET}"; then
+        echo "Unable to determine the 4D card names for ${MET}. Exiting script."
+        exit 1
+    fi
 
-    elif [[ ${type_images} != "mrsi" ]]; then
-        if [[ ${SMOOTHINGCARDS} == false ]]; then #SI pas de Smoothing
-
-            OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${MET}" "${NAME}")
-            if [[ $? -ne 0 ]]; then
-                echo "An error occurred while running name_4d_file. Exiting script."
-                exit 1 # Exit script if the function returns an error
-            fi
-            CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${MET}" "${NAME}")
-
-        else # SI smoothing (mis automatiquement pour le DTI : valeur du smooth par défaut pour le DTI)
-            OrigCARD4D=$(name_4d_file "${data_type}" "${acquisition}" "${MET}-smooth${SMOOTHSIGMA}" "${NAME}")
-            if [[ $? -ne 0 ]]; then
-                echo "An error occurred while running name_4d_file. Exiting script."
-                exit 1 # Exit script if the function returns an error
-            fi
-            CARD4D=$(name_4d_file "${data_type}" "${acquisition}-temp" "${MET}-smooth${SMOOTHSIGMA}" "${NAME}")
+    if [[ ${type_images} == "mrsi" ]]; then
+        if [[ ${METQUOTIENT} == false ]]; then
+            QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${met_quali}_${NAME}mask${MASK}_quali.nii.gz"
+        else
+            QUALIMASK="${GLOBAL_DIR}/Results/${NAME}/${SUM_METAB_LABEL}_${NAME}mask${MASK}_quali.nii.gz"
         fi
+    else
         if [[ ${type_images} == "dti" ]]; then
             QUALIMASK=$(get_mask_file_path "FA_2500.nii.gz" "dti")
             if [[ -z "$QUALIMASK" ]]; then
@@ -2334,10 +2394,6 @@ sweprocess() {
             fi
             QUALIMASK="${mask_file}"
         fi
-
-    else
-        echo "I don't know where we are but there seems to be an error while loading files for Randomise"
-        exit 1
     fi
 
     #cd $MET
@@ -2378,7 +2434,7 @@ sweprocess() {
     #subfile="../../${MATRIX}_design_sub.txt"
     swe -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -s ../../${MATRIX}.sub --wb -n ${NBPERMUT} -T --corrp --modified -m ${QUALIMASK} --glm_output
 
-    echo "SWE analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${acquisition} in ${MASK} region has been made" >>../../Result_randomise_${NAME}_${MATRIX}.txt
+    echo "SWE analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
     #### THIS MUST GO AS A FUNCTION
     # VARIABLES TO PASS : RESULT, SUFFIX, MASK
@@ -2500,25 +2556,24 @@ if [[ ${PREPARE} == true ]]; then
 
     echo "Cards 4D"
     for cardtodo in ${TODO[@]}; do
-        if [[ ${type_images} == "mrsi" ]]; then
-            card4dtodo=$(name_4d_file_mrsi "${data_type}" "${cardtodo}" "${acquisition}" "${NAME}")
-        else
-            card4dtodo=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodo}" "${NAME}")
-        fi
-        
-        #card4dtodo=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodo}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
+        if ! resolve_analysis_4d_cards "${cardtodo}"; then
             echo "Error naming 4D file at the checking for 4D card"
             exit 1
         fi
-        if [[ ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${card4dtodo} ]]; then #We have to find something else that this DO4D variable...
+        analysis_card4d="${OrigCARD4D}"
+        if ! resolve_matrix_check_4d_card "${cardtodo}"; then
+            echo "Error naming 4D file for matrix compatibility check"
+            exit 1
+        fi
+        card4dtocheck="${CHECKCARD4D}"
+        if [[ ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${analysis_card4d} || ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${card4dtocheck} ]]; then #We have to find something else that this DO4D variable...
             wrap4dcards ${data_type} ${acquisition} ${cardtodo}
 
             echo "Checking matrix and 4D card compatibility"
-            checkmatrix_4d ${card4dtodo}
+            checkmatrix_4d ${card4dtocheck}
         else
             echo "Checking matrix and 4D card compatibility"
-            checkmatrix_4d ${card4dtodo}
+            checkmatrix_4d ${card4dtocheck}
         fi
     done
 else
@@ -2663,13 +2718,14 @@ if [[ ${RANDOMISING} == true ]]; then
         for RANDOMASK in ${MASKS[@]}; do
 
             for thingtodo in ${TODO[@]}; do
+                RUN_LABEL=$(analysis_run_label "${acquisition}") || exit 1
                 if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then
                     confm="_CM"
                 else
                     confm=""
                 fi
 
-                OUTPUT="rdm_${thingtodo}_${NAME}_${MATRIX}_${acquisition}_${RANDOMASK}${confm}"
+                OUTPUT="rdm_${thingtodo}_${NAME}_${MATRIX}_${RUN_LABEL}_${RANDOMASK}${confm}"
                 if [[ ${LONGITUDINAL} == true && ${LONGITUDINAL_TOOL} == "swe" ]]; then
                     sweprocess ${RANDOMASK} ${thingtodo} ${OUTPUT}
                 else
@@ -2694,13 +2750,14 @@ if [[ ${EXTRACTING} == true ]]; then
     for RANDOMASK in ${MASKS[@]}; do
 
         for thingtodo in ${TODO[@]}; do
+            RUN_LABEL=$(analysis_run_label "${acquisition}") || exit 1
             if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then
                 confm="_CM"
             else
                 confm=""
             fi
 
-            OUTPUT="rdm_${thingtodo}_${NAME}_${MATRIX}_${acquisition}_${RANDOMASK}${confm}"
+            OUTPUT="rdm_${thingtodo}_${NAME}_${MATRIX}_${RUN_LABEL}_${RANDOMASK}${confm}"
             if ! select_analysis_4d_card "${thingtodo}"; then
                 exit 1
             fi
