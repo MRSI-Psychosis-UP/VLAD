@@ -849,7 +849,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 : "${RANALYSE_CREATION_SCRIPT:=${SCRIPT_DIR}/Randomise_sum_up_v3.Rmd}"
 : "${RANALYSE_CREATION_SCRIPT_SWE:=${SCRIPT_DIR}/SWE_sum_up_v1.5.2.Rmd}"
 : "${MATRIX_CREATION_SCRIPT_SWE:=${SCRIPT_DIR}/create_matrix_VLADlov_swe_alpha2.py}"
-: "${MATRIX_CREATION_SCRIPT:=${SCRIPT_DIR}/create_matrix_randoMRSI_beta6.py}"
+: "${MATRIX_CREATION_SCRIPT:=${SCRIPT_DIR}/create_matrix_randoMRSI_beta7.py}"
 : "${SNAPSHOT_CREATION_SCRIPT:=${SCRIPT_DIR}/snapshot_results_randomise_beta5.py}"
 
 configure_python

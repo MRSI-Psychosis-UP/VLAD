@@ -16,7 +16,7 @@
 # VLAD source files.
 !VLAD_beta7.sh
 !Prep_VLAD_b6.1.sh
-!create_matrix_randoMRSI_beta6.py
+!create_matrix_randoMRSI_beta7.py
 !create_matrix_VLADlov_swe_alpha2.py
 !create_matrix_VLADlov_afni_alpha1.py
 !resample_masks_b3_replace.py

@@ -8,7 +8,7 @@ This repository contains the current bash workflow and the Python/R helper files
 
 - `VLAD_beta7.sh`: main analysis script.
 - `Prep_VLAD_b6.1.sh`: interactive cohort/data preparation script.
-- `create_matrix_randoMRSI_beta6.py`: design and contrast matrix creation for standard Randomise analyses.
+- `create_matrix_randoMRSI_beta7.py`: design and contrast matrix creation for standard Randomise analyses.
 - `create_matrix_VLADlov_swe_alpha2.py`: design, contrast, and subject file creation for FSL SwE longitudinal analyses.
 - `create_matrix_VLADlov_afni_alpha1.py`: optional AFNI `3dLME` helper.
 - `resample_masks_b3_replace.py`: mask resampling helper used during preparation.
