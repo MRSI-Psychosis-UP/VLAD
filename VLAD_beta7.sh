@@ -1,4 +1,41 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# VLAD requires associative arrays and other features introduced in Bash 4.
+# If an older Bash launched this script, restart it with a compatible interpreter
+# already installed on the system. This does not change the user's login shell.
+if ((BASH_VERSINFO[0] < 4)); then
+    compatible_bash=""
+    path_bash=$(command -v bash 2>/dev/null || true)
+
+    for candidate in \
+        "${VLAD_BASH_BIN:-}" \
+        "$path_bash" \
+        /opt/homebrew/bin/bash \
+        /usr/local/bin/bash \
+        /usr/bin/bash \
+        /bin/bash; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        if "$candidate" -c '((BASH_VERSINFO[0] >= 4))' >/dev/null 2>&1; then
+            compatible_bash="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$compatible_bash" ]]; then
+        printf 'Error: %s requires Bash 4 or newer (currently Bash %s).\n' "$(basename "${BASH_SOURCE[0]}")" "$BASH_VERSION" >&2
+        printf 'Install a newer Bash (on macOS: brew install bash), or set VLAD_BASH_BIN=/path/to/bash.\n' >&2
+        exit 1
+    fi
+
+    script_path="${BASH_SOURCE[0]}"
+    if [[ "$script_path" != /* ]]; then
+        script_path="$(cd "$(dirname "$script_path")" && pwd)/$(basename "$script_path")"
+    fi
+
+    printf 'Restarting %s with Bash %s at %s.\n' "$(basename "$script_path")" "$("$compatible_bash" -c 'printf "%s" "$BASH_VERSION"')" "$compatible_bash" >&2
+    exec "$compatible_bash" "$script_path" "$@"
+fi
+
 #----------------------------
 #VLAD for MRSI : The final script
 #----------------------------
@@ -367,7 +404,7 @@ display_help() {
     echo ""
     echo "  -p, --perm <value>	     Number of permutations By default 300"
     echo "  --cards	[value]          Will force to do the 4D cards. This option also permits to use a different suffix than the default \"filled\" for cards. Just add an argument after it :-). If empty, will do the filled."
-    echo "  --mask <value>           Do randomise with a grey matter and white matter mask (on top of a global mask): possible values : wmgm (white and total grey matter) / wmgmbg (same but grey matter separated in cortical and basal ganglia) / onlygrey (only GM) / onlywhite (only WM) / cerebellum (GM+WM+cerebellum) / onlygreydetail (GM separated in cortical and basal ganglia)"
+    echo "  --mask <value>           MRSI/structural tissue-mask presets only. DTI always uses the primary mask recorded during preparation. Values: wmgm / wmgmbg / onlygrey / onlywhite / cerebellum / onlygreydetail"
     echo "  --qualithresh <value>    Quality threshold (%of subject) to mask the WM_GM / WM / GM masks on analysis (put the %age of subject, for eg if 50%, put --qualithresh 50)"
     echo "  --smooth                 Force smoothing of cards before analysis masking, including MRSI. Specify sigma after it; default = 1."
     echo "  --logarithm              Apply logarithm to the data before randomise"
@@ -619,6 +656,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         cerebellum)
             MASKS=('white-grey-matter-cerebellum')
+            ;;
+        *)
+            echo "Invalid --mask value: $mask_choice"
+            display_help
+            exit 1
             ;;
         esac
         shift 2
@@ -1023,6 +1065,13 @@ mrsi)
     ;;
 dti)
     source config_dti.sh
+    if [[ -n "${mask_choice:-}" ]]; then
+        echo "The --mask tissue presets are not available for DTI. DTI uses the primary mask selected in Prep_VLAD_b6.1.sh."
+        exit 1
+    fi
+    # Keep one stable analysis/output label; the actual DTI mask is resolved
+    # independently from its filename below.
+    MASKS=('white-grey-matter')
     nii_cards=${NII_DIR_DTI}
     nii_cards_orga=${NII_DIR_DTI_orga}
     if [[ ${NII_DIR_DTI_compression} == "yes" || ${NII_DIR_DTI_compression} == "y" ]]; then
@@ -1730,6 +1779,89 @@ get_mask_file_path() {
     return 1
 }
 
+get_dti_mask_file_by_name() {
+    local mask_filename="$1"
+    local candidates=()
+    local candidate
+
+    [[ -n "$mask_filename" ]] || return 1
+    if [[ -f "$mask_filename" ]]; then
+        printf '%s\n' "$mask_filename"
+        return 0
+    fi
+
+    candidates+=("${GLOBAL_DIR}/Masques/${COHORT}/dti/${mask_filename}")
+    candidates+=("${GLOBAL_DIR}/Masques/${COHORT}/${mask_filename}")
+    candidates+=("${GLOBAL_DIR}/Masques/dti/${mask_filename}")
+    candidates+=("${GLOBAL_DIR}/Masques/${mask_filename}")
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_dti_analysis_mask() {
+    local configured_mask
+    configured_mask=$(trim_whitespace "${DTI_ANALYSIS_MASK_FILENAME:-}")
+    local resolved_mask=""
+
+    if [[ -n "$configured_mask" ]]; then
+        resolved_mask=$(get_dti_mask_file_by_name "$configured_mask")
+        if [[ -n "$resolved_mask" && -f "$resolved_mask" ]]; then
+            printf '%s\n' "$resolved_mask"
+            return 0
+        fi
+        echo "Configured DTI analysis mask '$configured_mask' was not found." >&2
+        echo "Run Prep_VLAD_b6.1.sh again or correct DTI_ANALYSIS_MASK_FILENAME in config_dti.sh." >&2
+        return 1
+    fi
+
+    # Compatibility with cohorts configured before DTI mask filenames were recorded.
+    resolved_mask=$(get_dti_mask_file_by_name "FA_2500.nii.gz")
+    if [[ -n "$resolved_mask" && -f "$resolved_mask" ]]; then
+        printf '%s\n' "$resolved_mask"
+        return 0
+    fi
+
+    local dti_mask_dir="${GLOBAL_DIR}/Masques/${COHORT}/dti"
+    local candidates=()
+    local candidate
+    if [[ -d "$dti_mask_dir" ]]; then
+        while IFS= read -r candidate; do
+            [[ -n "$candidate" ]] && candidates+=("$candidate")
+        done < <(find "$dti_mask_dir" -maxdepth 1 -type f \( -name '*.nii' -o -name '*.nii.gz' \) ! -name '._*' -print 2>/dev/null | sort)
+    fi
+
+    if [[ ${#candidates[@]} -eq 1 ]]; then
+        echo "Warning: DTI_ANALYSIS_MASK_FILENAME is absent; using the only NIfTI mask in $dti_mask_dir." >&2
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        echo "No DTI analysis mask was found." >&2
+        echo "Expected a configured DTI_ANALYSIS_MASK_FILENAME, legacy FA_2500.nii.gz, or one NIfTI file in $dti_mask_dir." >&2
+    else
+        echo "DTI_ANALYSIS_MASK_FILENAME is absent and multiple DTI masks were found:" >&2
+        for candidate in "${candidates[@]}"; do
+            echo "  $candidate" >&2
+        done
+        echo "Select one primary mask with Prep_VLAD_b6.1.sh." >&2
+    fi
+    return 1
+}
+
+get_active_dti_analysis_mask() {
+    if [[ -n "${DTI_ANALYSIS_MASK_PATH:-}" && -f "$DTI_ANALYSIS_MASK_PATH" ]]; then
+        printf '%s\n' "$DTI_ANALYSIS_MASK_PATH"
+        return 0
+    fi
+    resolve_dti_analysis_mask
+}
+
 wrap4dcards() { # This needs to be more flexible...
 
     TARGET_DIR="${GLOBAL_DIR}/Cartes4D/${NAME}"
@@ -2232,16 +2364,15 @@ randoextract() {
         fi
     else
         if [[ ${type_images} == "dti" ]]; then
-            QUALIMASK=$(get_mask_file_path "FA_2500.nii.gz" "dti")
-            if [[ -z "$QUALIMASK" ]]; then
-                echo "Unable to locate FA_2500.nii.gz for DTI masks. Please prepare masks with Prep_VLAD_b5.sh."
+            if ! QUALIMASK=$(get_active_dti_analysis_mask); then
+                echo "Unable to resolve the primary DTI analysis mask."
                 exit 1
             fi
         else
             local mask_file
             mask_file=$(get_mask_file_path "HarvardOxford-${MASK}.nii.gz" "${type_images}")
             if [[ -z "$mask_file" ]]; then
-                echo "Unable to locate HarvardOxford-${MASK}.nii.gz for ${type_images}. Please prepare masks with Prep_VLAD_b5.sh."
+                echo "Unable to locate HarvardOxford-${MASK}.nii.gz for ${type_images}. Please prepare masks with Prep_VLAD_b6.1.sh."
                 exit 1
             fi
             QUALIMASK="${mask_file}"
@@ -2380,16 +2511,15 @@ sweprocess() {
         fi
     else
         if [[ ${type_images} == "dti" ]]; then
-            QUALIMASK=$(get_mask_file_path "FA_2500.nii.gz" "dti")
-            if [[ -z "$QUALIMASK" ]]; then
-                echo "Unable to locate FA_2500.nii.gz for DTI masks. Please prepare masks with Prep_VLAD_b5.sh."
+            if ! QUALIMASK=$(get_active_dti_analysis_mask); then
+                echo "Unable to resolve the primary DTI analysis mask."
                 exit 1
             fi
         else
             local mask_file
             mask_file=$(get_mask_file_path "HarvardOxford-${MASK}.nii.gz" "${type_images}")
             if [[ -z "$mask_file" ]]; then
-                echo "Unable to locate HarvardOxford-${MASK}.nii.gz for ${type_images}. Please prepare masks with Prep_VLAD_b5.sh."
+                echo "Unable to locate HarvardOxford-${MASK}.nii.gz for ${type_images}. Please prepare masks with Prep_VLAD_b6.1.sh."
                 exit 1
             fi
             QUALIMASK="${mask_file}"
@@ -2609,20 +2739,28 @@ if [[ ${RANDOMISING} == true ]]; then
 
     #### Checking masks
     #### Checking masks
-    for RANDOMASK in ${MASKS[@]}; do
-        mask="HarvardOxford-${RANDOMASK}.nii.gz"
-        mask_path=$(get_mask_file_path "${mask}" "${type_images}")
-        if [[ -z "$mask_path" ]]; then
-            echo "Mask ${mask} not found for modality ${type_images}. Aborting."
+    if [[ ${type_images} == "dti" ]]; then
+        if ! DTI_ANALYSIS_MASK_PATH=$(resolve_dti_analysis_mask); then
+            echo "Primary DTI analysis mask unavailable. Aborting."
             exit 1
         fi
-        # echo "looking for reslicing, beta mode"
-        # reslice_mask "${mask_path}" "${T1_MNI}"
-        # if [[ $? -ne 0 ]]; then
-        #     echo "Bug in reslicing masks"
-        #     exit 1
-        # fi
-    done
+        echo "Using DTI analysis mask: $DTI_ANALYSIS_MASK_PATH"
+    else
+        for RANDOMASK in ${MASKS[@]}; do
+            mask="HarvardOxford-${RANDOMASK}.nii.gz"
+            mask_path=$(get_mask_file_path "${mask}" "${type_images}")
+            if [[ -z "$mask_path" ]]; then
+                echo "Mask ${mask} not found for modality ${type_images}. Aborting."
+                exit 1
+            fi
+            # echo "looking for reslicing, beta mode"
+            # reslice_mask "${mask_path}" "${T1_MNI}"
+            # if [[ $? -ne 0 ]]; then
+            #     echo "Bug in reslicing masks"
+            #     exit 1
+            # fi
+        done
+    fi
 
 
     # for RANDOMASK in ${MASKS[@]}; do

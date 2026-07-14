@@ -3,11 +3,11 @@ import os
 import argparse
 import shutil
 from nilearn.image import load_img, resample_img, index_img
-from nilearn.masking import unmask
 from pathlib import Path
 
 def resample_masks_to_t1_mni(mask_paths, t1_mni_path, backup_dirname='original',
-                             interpolation='nearest', replace=False):
+                             interpolation='nearest', replace=False,
+                             output_path=None):
     """
     Resample a list of mask images to the space of a T1_MNI reference.
 
@@ -40,7 +40,15 @@ def resample_masks_to_t1_mni(mask_paths, t1_mni_path, backup_dirname='original',
     replace : bool, optional
         If True, replace originals in place (with backup). If False, write
         alongside as "-resampled". Default is False.
+    output_path : str, optional
+        Explicit destination for one resampled mask. This cannot be combined
+        with ``replace`` and requires exactly one input mask.
     """
+    if output_path is not None and len(mask_paths) != 1:
+        raise ValueError("--output requires exactly one input mask")
+    if output_path is not None and replace:
+        raise ValueError("--output cannot be combined with --replace")
+
     # Load target reference (support 3D/4D by taking first volume when 4D)
     t1_mni = load_img(t1_mni_path)
     if len(t1_mni.shape) == 4:
@@ -66,7 +74,12 @@ def resample_masks_to_t1_mni(mask_paths, t1_mni_path, backup_dirname='original',
             copy_header=True
         )
 
-        if replace:
+        if output_path is not None:
+            out_path = Path(output_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            resampled.to_filename(str(out_path))
+            print(f"Wrote resampled mask to: {out_path}")
+        elif replace:
             # Prepare backup directory and unique backup path
             backup_dir = p.parent / backup_dirname
             os.makedirs(backup_dir, exist_ok=True)
@@ -115,10 +128,11 @@ if __name__ == "__main__":
     parser.add_argument("--t1", dest="t1_mni", required=True, help="Path to the T1 MNI reference image (3D or 4D; if 4D, first volume is used).")
     parser.add_argument("--backup-dirname", dest="backup_dirname", default="original", help="Name of the directory (created next to each mask) to store the original mask before replacement (default: original).")
     parser.add_argument("--replace", action="store_true", help="Replace originals in place (with backup to --backup-dirname). If not set, write alongside with '-resampled'.")
+    parser.add_argument("--output", help="Write one resampled mask directly to this destination path.")
     parser.add_argument("--interp", choices=["nearest", "continuous"], default="nearest", help="Interpolation: nearest for masks, continuous for maps.")
     args = parser.parse_args()
 
     mask_paths = args.masks
     t1_mni_path = args.t1_mni
 
-    resample_masks_to_t1_mni(mask_paths, t1_mni_path, backup_dirname=args.backup_dirname, interpolation=args.interp, replace=args.replace)
+    resample_masks_to_t1_mni(mask_paths, t1_mni_path, backup_dirname=args.backup_dirname, interpolation=args.interp, replace=args.replace, output_path=args.output)

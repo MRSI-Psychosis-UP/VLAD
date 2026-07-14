@@ -21,13 +21,15 @@ This repository contains the current bash workflow and the Python/R helper files
 
 Install these outside Python/R before running VLAD:
 
-- Bash 4 or newer.
+- Bash 4 or newer. Both VLAD shell entrypoints verify this and automatically restart with a compatible Bash found in `PATH` or a standard Homebrew location.
 - FSL with `fslmaths`, `fslmerge`, `fslsplit`, `fslstats`, `fslval`, `flirt`, `Text2Vest`, and `randomise` or `randomise_parallel` in `PATH`.
 - FSL SwE command `swe` if using `--longitudinal swe`.
 - AFNI with `3dLME` in `PATH` if using `create_matrix_VLADlov_afni_alpha1.py`.
 - R, Rscript, and Pandoc for the HTML reports.
 - A Python 3 installation with Tk support, because the matrix helpers open an Excel file-selection dialog.
-- `zenity` for the interactive preparation script dialogs on Linux. On macOS, install it with Homebrew if needed.
+- `zenity` for the interactive preparation script dialogs on Linux. macOS uses its native file and folder choosers instead.
+
+macOS ships `/bin/bash` 3.2, which is too old for VLAD. Install a current Bash once with `brew install bash`, then run the scripts directly with `./Prep_VLAD_b6.1.sh` or `./VLAD_beta7.sh`. Do not force `/bin/bash`; if automatic discovery is unsuitable, set `VLAD_BASH_BIN` to the compatible Bash executable you want VLAD to use.
 
 ## Python setup
 
@@ -52,7 +54,7 @@ If you use `pyenv`, the main script also accepts:
 ./VLAD_beta7.sh --python-env venv-mri ...
 ```
 
-`Prep_VLAD_b6.1.sh` currently calls `python3` directly for mask resampling, so activate the environment before running preparation.
+`Prep_VLAD_b6.1.sh` uses the active `python3`, or the interpreter named by `VLAD_PYTHON_BIN`, for mask validation and resampling. It checks for `nibabel`, `nilearn`, and `numpy` before preparing masks and stops with a clear message if they are unavailable.
 
 ## R setup
 
@@ -74,7 +76,9 @@ Make the scripts executable if the clone did not preserve file modes:
 chmod +x VLAD_beta7.sh Prep_VLAD_b6.1.sh
 ```
 
-Activate the Python environment before preparation, because `Prep_VLAD_b6.1.sh` calls `python3` directly for mask resampling:
+Launch the scripts directly as shown below. Their interpreter bootstrap checks for Bash 4 or newer and preserves all command-line arguments if it needs to restart under a newer Bash.
+
+Activate the Python environment before preparation (or export `VLAD_PYTHON_BIN` as shown above):
 
 ```bash
 source .venv/bin/activate
@@ -166,6 +170,20 @@ Mask presets in `VLAD_beta7.sh` use these files:
 - `--mask onlywhite`: white-matter
 - `--mask onlygreydetail`: grey-matter, cortex, subcortical-nuclei
 - `--mask cerebellum`: white-grey-matter-cerebellum
+
+The mask input accepts a single `.nii`/`.nii.gz` image, multiple files selected in the chooser, or a text manifest ending in `.txt` or `.list`. Manifest lines may contain mask paths or filenames; blank lines and lines beginning with `#` are ignored. A NIfTI image is never read as a text manifest.
+
+### DTI analysis mask
+
+DTI uses one primary analysis mask per cohort. During DTI preparation, select a single mask; its original filename can be arbitrary, for example `FA_2500.nii.gz`, `white_matter_mask.nii.gz`, or `study_FA_threshold.nii.gz`. Preparation copies or nearest-neighbour resamples it into:
+
+```text
+GLOBAL_DIR/Masques/<COHORT>/dti/
+```
+
+After successful preparation, `config_dti.sh` records the basename as `DTI_ANALYSIS_MASK_FILENAME`. `VLAD_beta7.sh` uses that value for both Randomise and SwE. For older cohorts without this setting, VLAD first supports the legacy `FA_2500.nii.gz` name, then accepts the only NIfTI file in the cohort DTI mask directory. If none or several are present, it stops and asks for an unambiguous primary mask.
+
+The tissue presets selected with `--mask` apply to MRSI and structural analyses, not DTI. Supplying `--mask` with `-t DTI` is rejected because the configured primary DTI mask is always used.
 
 Expected MRSI filenames are:
 
@@ -339,6 +357,8 @@ Prepare now and queue the analysis for later:
 - `--remakeall`: delete the current `Cartes4D/<NAME>`, `Results/<NAME>`, and `Listes/List_<NAME>.txt` outputs before rebuilding.
 
 Because `-m` means matrix, use the long option `--mask` for tissue masks.
+
+These `--mask` presets are for MRSI and structural analyses. DTI uses its configured primary analysis mask instead.
 
 For help:
 

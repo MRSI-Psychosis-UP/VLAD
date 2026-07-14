@@ -1,4 +1,40 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# VLAD requires associative arrays and other features introduced in Bash 4.
+# If an older Bash launched this script, restart it with a compatible interpreter
+# already installed on the system. This does not change the user's login shell.
+if ((BASH_VERSINFO[0] < 4)); then
+    compatible_bash=""
+    path_bash=$(command -v bash 2>/dev/null || true)
+
+    for candidate in \
+        "${VLAD_BASH_BIN:-}" \
+        "$path_bash" \
+        /opt/homebrew/bin/bash \
+        /usr/local/bin/bash \
+        /usr/bin/bash \
+        /bin/bash; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        if "$candidate" -c '((BASH_VERSINFO[0] >= 4))' >/dev/null 2>&1; then
+            compatible_bash="$candidate"
+            break
+        fi
+    done
+
+    if [[ -z "$compatible_bash" ]]; then
+        printf 'Error: %s requires Bash 4 or newer (currently Bash %s).\n' "$(basename "${BASH_SOURCE[0]}")" "$BASH_VERSION" >&2
+        printf 'Install a newer Bash (on macOS: brew install bash), or set VLAD_BASH_BIN=/path/to/bash.\n' >&2
+        exit 1
+    fi
+
+    script_path="${BASH_SOURCE[0]}"
+    if [[ "$script_path" != /* ]]; then
+        script_path="$(cd "$(dirname "$script_path")" && pwd)/$(basename "$script_path")"
+    fi
+
+    printf 'Restarting %s with Bash %s at %s.\n' "$(basename "$script_path")" "$("$compatible_bash" -c 'printf "%s" "$BASH_VERSION"')" "$compatible_bash" >&2
+    exec "$compatible_bash" "$script_path" "$@"
+fi
 
 METABSUM3T=("NAANAAG" "CrPCr" "GPCPCh" "Ins" "GluGln")
 METABSUM7T5=("NAANAAG" "GluGln")
@@ -46,7 +82,6 @@ done
 #Create an option to delete a previous configuration file
 
 # WHAT WE NEED TO ADD :
-# - Verification of bash version (>4)
 # - Installation of zenity via homebrew
 # - A tool to verify that your files are in good format
 # - Installation of usefull packages : fsl, python environment, R packages, pandoc
@@ -178,38 +213,57 @@ append_unique() {
 METABSUM_EXPORT=()
 METABQUOTIENTS_EXPORT=()
 METAB_EXPORT=()
+PREPARED_MASK_PATHS=()
+PARSED_MASK_ENTRIES=()
+PREP_MASK_PYTHON=""
+
+ensure_mask_python() {
+    if [[ -n "$PREP_MASK_PYTHON" && -x "$PREP_MASK_PYTHON" ]]; then
+        return 0
+    fi
+
+    local candidate="${VLAD_PYTHON_BIN:-}"
+    if [[ -z "$candidate" ]]; then
+        candidate=$(command -v python3 2>/dev/null || true)
+    elif [[ "$candidate" != */* ]]; then
+        candidate=$(command -v "$candidate" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+        echo "A Python 3 interpreter is required to validate and resample masks." >&2
+        echo "Activate the VLAD Python environment or set VLAD_PYTHON_BIN=/path/to/python3." >&2
+        return 1
+    fi
+    if ! "$candidate" -c 'import nibabel, nilearn, numpy' >/dev/null 2>&1; then
+        echo "Python at '$candidate' is missing nibabel, nilearn, or numpy." >&2
+        echo "Activate the VLAD Python environment or set VLAD_PYTHON_BIN to its Python interpreter." >&2
+        return 1
+    fi
+
+    PREP_MASK_PYTHON="$candidate"
+}
 
 compare_nifti_files() {
     local file1="$1"
     local file2="$2"
 
-    local dim1_file1 dim2_file1 dim3_file1
-    local dim1_file2 dim2_file2 dim3_file2
-    local pixdim1_file1 pixdim2_file1 pixdim3_file1
-    local pixdim1_file2 pixdim2_file2 pixdim3_file2
+    ensure_mask_python || return 2
+    "$PREP_MASK_PYTHON" -c '
+import sys
+import nibabel as nib
+import numpy as np
 
-    dim1_file1=$(fslval "$file1" dim1)
-    dim2_file1=$(fslval "$file1" dim2)
-    dim3_file1=$(fslval "$file1" dim3)
+try:
+    first = nib.load(sys.argv[1])
+    second = nib.load(sys.argv[2])
+except Exception as exc:
+    print(f"Unable to read NIfTI geometry: {exc}", file=sys.stderr)
+    raise SystemExit(2)
 
-    dim1_file2=$(fslval "$file2" dim1)
-    dim2_file2=$(fslval "$file2" dim2)
-    dim3_file2=$(fslval "$file2" dim3)
-
-    pixdim1_file1=$(fslval "$file1" pixdim1)
-    pixdim2_file1=$(fslval "$file1" pixdim2)
-    pixdim3_file1=$(fslval "$file1" pixdim3)
-
-    pixdim1_file2=$(fslval "$file2" pixdim1)
-    pixdim2_file2=$(fslval "$file2" pixdim2)
-    pixdim3_file2=$(fslval "$file2" pixdim3)
-
-    if [[ "$dim1_file1" == "$dim1_file2" && "$dim2_file1" == "$dim2_file2" && "$dim3_file1" == "$dim3_file2" &&
-        "$pixdim1_file1" == "$pixdim1_file2" && "$pixdim2_file1" == "$pixdim2_file2" && "$pixdim3_file1" == "$pixdim3_file2" ]]; then
-        echo 0
-    else
-        echo 1
-    fi
+same_shape = first.shape[:3] == second.shape[:3]
+same_affine = np.allclose(first.affine, second.affine, rtol=1e-5, atol=1e-5)
+raise SystemExit(0 if same_shape and same_affine else 1)
+' "$file1" "$file2"
 }
 
 trim_whitespace() {
@@ -287,37 +341,62 @@ resolve_mask_source_path() {
     fi
 }
 
+is_nifti_path() {
+    local lower_path="${1,,}"
+    [[ "$lower_path" == *.nii || "$lower_path" == *.nii.gz ]]
+}
+
+parse_mask_entries() {
+    local mask_input="$1"
+    local lower_input="${mask_input,,}"
+    local raw_entries=()
+    local entry
+
+    PARSED_MASK_ENTRIES=()
+    if [[ "$mask_input" == *"|"* ]]; then
+        IFS='|' read -r -a raw_entries <<<"$mask_input"
+    elif [[ -f "$mask_input" && ( "$lower_input" == *.txt || "$lower_input" == *.list ) ]]; then
+        while IFS= read -r entry || [[ -n "$entry" ]]; do
+            entry=$(trim_whitespace "$entry")
+            [[ -z "$entry" || "$entry" == \#* ]] && continue
+            raw_entries+=("$entry")
+        done <"$mask_input"
+    else
+        raw_entries=("$mask_input")
+    fi
+
+    for entry in "${raw_entries[@]}"; do
+        entry=$(trim_whitespace "$entry")
+        [[ -z "$entry" ]] && continue
+        PARSED_MASK_ENTRIES+=("$entry")
+    done
+}
+
 run_resample_and_copy_mask() {
     local mask_path="$1"
     local reference_image="$2"
     local destination="$3"
 
-    if ! should_create_file "$destination"; then
-        return 0
-    fi
-
     if [[ -z "$script_dir" ]]; then
         echo "script_dir is not defined. Cannot call resample_masks_b3_replace.py"
         return 1
     fi
+    ensure_mask_python || return 1
 
     local resample_output
-    if ! resample_output=$(python3 "${script_dir}/resample_masks_b3_replace.py" --masks "$mask_path" --t1 "$reference_image" --interp nearest 2>&1); then
+    if ! resample_output=$("$PREP_MASK_PYTHON" "${script_dir}/resample_masks_b3_replace.py" --masks "$mask_path" --t1 "$reference_image" --output "$destination" --interp nearest 2>&1); then
         echo "Resampling failed for $mask_path"
         echo "$resample_output"
         return 1
     fi
 
-    local resampled_file
-    resampled_file=$(echo "$resample_output" | awk -F": " '/Wrote resampled mask to:/ {print $2}' | tail -n 1)
-    if [[ -z "$resampled_file" || ! -f "$resampled_file" ]]; then
-        echo "Unable to locate resampled mask for $mask_path"
+    if [[ ! -f "$destination" ]]; then
+        echo "Resampling completed without creating the expected file: $destination"
         echo "$resample_output"
         return 1
     fi
 
-    cp "$resampled_file" "$destination"
-    rm -f "$resampled_file"
+    [[ -n "$resample_output" ]] && echo "$resample_output"
     echo "Resampled mask stored at $destination"
 }
 
@@ -395,45 +474,42 @@ configure_masks_for_modality() {
         return 1
     fi
 
-    local mask_entries=()
-    if [[ -f "$mask_list" ]]; then
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            local entry
-            entry=$(trim_whitespace "$line")
-            [[ -z "$entry" || "$entry" == \#* ]] && continue
-            mask_entries+=("$entry")
-        done <"$mask_list"
-    else
-        IFS='|' read -r -a mask_entries <<<"$mask_list"
-    fi
-
-    local parsed_entries=()
-    for entry in "${mask_entries[@]}"; do
-        entry=$(trim_whitespace "$entry")
-        [[ -z "$entry" ]] && continue
-        parsed_entries+=("$entry")
-    done
-    mask_entries=("${parsed_entries[@]}")
+    parse_mask_entries "$mask_list"
+    local mask_entries=("${PARSED_MASK_ENTRIES[@]}")
 
     if [[ ${#mask_entries[@]} -eq 0 ]]; then
-        echo "No valid masks specified for ${modality}, skipping."
-        return 0
+        echo "No valid masks specified for ${modality}." >&2
+        return 1
     fi
+
+    ensure_mask_python || return 1
 
     local masks_root="${GLOBAL_DIR}/Masques"
     local cohort_name="${COHORT:-default}"
     local dest_dir="${masks_root}/${cohort_name}/${modality}"
-    mkdir -p "$dest_dir"
+    if ! mkdir -p "$dest_dir"; then
+        echo "Unable to create the mask directory: $dest_dir" >&2
+        return 1
+    fi
 
     echo "Preparing masks for ${modality} in $dest_dir"
+    PREPARED_MASK_PATHS=()
+    local preparation_failed=false
 
     for entry in "${mask_entries[@]}"; do
         entry=$(trim_whitespace "$entry")
         [[ -z "$entry" ]] && continue
+        if ! is_nifti_path "$entry"; then
+            echo "Mask entry '$entry' is not a .nii or .nii.gz file." >&2
+            preparation_failed=true
+            continue
+        fi
+
         local mask_path
         mask_path=$(resolve_mask_source_path "$entry" "$dest_dir")
         if [[ -z "$mask_path" || ! -f "$mask_path" ]]; then
-            echo "Mask entry '$entry' not found. Skipping."
+            echo "Mask entry '$entry' was not found." >&2
+            preparation_failed=true
             continue
         fi
 
@@ -441,17 +517,49 @@ configure_masks_for_modality() {
         mask_name=$(basename "$mask_path")
         local destination="${dest_dir}/${mask_name}"
 
-        if ! should_create_file "$destination"; then
+        if [[ "$mask_path" == "$destination" ]]; then
+            PREPARED_MASK_PATHS+=("$destination")
+            echo "Mask is already stored at $destination"
             continue
         fi
 
-        if [[ $(compare_nifti_files "$mask_path" "$reference_image") -eq 0 ]]; then
-            cp "$mask_path" "$destination"
-            echo "Copied already aligned mask ${mask_name} to ${destination}"
-        else
-            run_resample_and_copy_mask "$mask_path" "$reference_image" "$destination"
+        if ! should_create_file "$destination"; then
+            PREPARED_MASK_PATHS+=("$destination")
+            continue
         fi
+
+        compare_nifti_files "$mask_path" "$reference_image"
+        local geometry_status=$?
+        case "$geometry_status" in
+        0)
+            if cp "$mask_path" "$destination"; then
+                echo "Copied already aligned mask ${mask_name} to ${destination}"
+                PREPARED_MASK_PATHS+=("$destination")
+            else
+                echo "Unable to copy mask '$mask_path' to '$destination'." >&2
+                preparation_failed=true
+            fi
+            ;;
+        1)
+            if run_resample_and_copy_mask "$mask_path" "$reference_image" "$destination"; then
+                PREPARED_MASK_PATHS+=("$destination")
+            else
+                preparation_failed=true
+            fi
+            ;;
+        *)
+            echo "Unable to validate NIfTI geometry for '$mask_path'." >&2
+            preparation_failed=true
+            ;;
+        esac
     done
+
+    if [[ "$preparation_failed" == true ]]; then
+        echo "One or more ${modality} masks could not be prepared." >&2
+        return 1
+    fi
+
+    [[ ${#PREPARED_MASK_PATHS[@]} -gt 0 ]]
 }
 
 check_file_not_empty() {
@@ -490,16 +598,198 @@ check_file_not_empty() {
     return 0
 }
 
-# Function to prompt for a directory path with graphical interface (zenity)
+# Return a usable starting directory for graphical file choosers.
+dialog_start_directory() {
+    local requested_path="$1"
+
+    if [[ -d "$requested_path" ]]; then
+        printf '%s\n' "$requested_path"
+    elif [[ -n "$requested_path" && -d "$(dirname "$requested_path")" ]]; then
+        dirname "$requested_path"
+    elif [[ -n "$GLOBAL_DIR" && -d "$GLOBAL_DIR" ]]; then
+        printf '%s\n' "$GLOBAL_DIR"
+    else
+        printf '%s\n' "$HOME"
+    fi
+}
+
+macos_choose_path() {
+    local selection_mode="$1"
+    local prompt="$2"
+    local start_dir="$3"
+
+    if ! command -v osascript >/dev/null 2>&1; then
+        echo "osascript is required for file selection on macOS." >&2
+        return 2
+    fi
+
+    osascript -l JavaScript - "$selection_mode" "$prompt" "$start_dir" <<'JAVASCRIPT'
+function run(argv) {
+    var selectionMode = argv[0];
+    var promptText = argv[1];
+    var startDirectory = argv[2];
+    var app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+
+    var options = {withPrompt: promptText};
+    if (startDirectory) {
+        options.defaultLocation = Path(startDirectory);
+    }
+
+    try {
+        if (selectionMode === "directory") {
+            return app.chooseFolder(options).toString();
+        }
+
+        if (selectionMode === "multiple") {
+            options.multipleSelectionsAllowed = true;
+            var chosenFiles = app.chooseFile(options);
+            var selectedPaths = [];
+            for (var i = 0; i < chosenFiles.length; i++) {
+                selectedPaths.push(chosenFiles[i].toString());
+            }
+            return selectedPaths.join("|");
+        }
+
+        return app.chooseFile(options).toString();
+    } catch (error) {
+        var errorText = String(error);
+        if (error.errorNumber === -128 || error.number === -128 || errorText.indexOf("-128") !== -1) {
+            return "";
+        }
+        throw error;
+    }
+}
+JAVASCRIPT
+}
+
+macos_choose_directory() {
+    local prompt="$1"
+    local start_dir="$2"
+    local selection
+
+    selection=$(macos_choose_path "directory" "$prompt" "$start_dir") || return 2
+
+    if [[ "$selection" != "/" ]]; then
+        selection=${selection%/}
+    fi
+    printf '%s\n' "$selection"
+}
+
+macos_choose_file() {
+    local prompt="$1"
+    local start_dir="$2"
+
+    macos_choose_path "file" "$prompt" "$start_dir" || return 2
+}
+
+macos_choose_multiple_files() {
+    local prompt="$1"
+    local start_dir="$2"
+
+    macos_choose_path "multiple" "$prompt" "$start_dir" || return 2
+}
+
+select_directory_path() {
+    local prompt="$1"
+    local default_value="$2"
+    local start_dir
+    local selection
+    local status
+
+    start_dir=$(dialog_start_directory "$default_value")
+    if [[ $(uname -s) == "Darwin" ]]; then
+        macos_choose_directory "$prompt" "$start_dir"
+        return $?
+    fi
+
+    if ! command -v zenity >/dev/null 2>&1; then
+        echo "zenity is required for file selection on this platform." >&2
+        return 2
+    fi
+
+    selection=$(zenity --file-selection --directory --title="$prompt" --height=500 --filename="${start_dir%/}/" 2>/dev/null)
+    status=$?
+    if [[ $status -eq 0 ]]; then
+        printf '%s\n' "$selection"
+        return 0
+    elif [[ $status -eq 1 ]]; then
+        return 0
+    fi
+    return 2
+}
+
+select_file_path() {
+    local prompt="$1"
+    local default_value="$2"
+    local start_dir
+    local selection
+    local status
+
+    start_dir=$(dialog_start_directory "$default_value")
+    if [[ $(uname -s) == "Darwin" ]]; then
+        macos_choose_file "$prompt" "$start_dir"
+        return $?
+    fi
+
+    if ! command -v zenity >/dev/null 2>&1; then
+        echo "zenity is required for file selection on this platform." >&2
+        return 2
+    fi
+
+    selection=$(zenity --file-selection --title="$prompt" --filename="${start_dir%/}/" 2>/dev/null)
+    status=$?
+    if [[ $status -eq 0 ]]; then
+        printf '%s\n' "$selection"
+        return 0
+    elif [[ $status -eq 1 ]]; then
+        return 0
+    fi
+    return 2
+}
+
+select_multiple_file_paths() {
+    local prompt="$1"
+    local default_value="$2"
+    local start_dir
+    local selection
+    local status
+
+    start_dir=$(dialog_start_directory "$default_value")
+    if [[ $(uname -s) == "Darwin" ]]; then
+        macos_choose_multiple_files "$prompt" "$start_dir"
+        return $?
+    fi
+
+    if ! command -v zenity >/dev/null 2>&1; then
+        echo "zenity is required for file selection on this platform." >&2
+        return 2
+    fi
+
+    selection=$(zenity --file-selection --multiple --separator="|" --title="$prompt" --filename="${start_dir%/}/" 2>/dev/null)
+    status=$?
+    if [[ $status -eq 0 ]]; then
+        printf '%s\n' "$selection"
+        return 0
+    elif [[ $status -eq 1 ]]; then
+        return 0
+    fi
+    return 2
+}
+
+# Function to prompt for a directory path with a platform-native graphical interface
 prompt_for_directory() {
     local varname=$1
     local prompt=$2
     local default_value=$3
+    local value
 
     echo "$prompt"
 
-    # Use zenity to display a folder selection dialog, suppress errors
-    value=$(zenity --file-selection --directory --title="$prompt" --height=500 --filename="$default_value/" 2>/dev/null)
+    if ! value=$(select_directory_path "$prompt" "$default_value"); then
+        echo "Unable to open the directory selection dialog. Aborting." >&2
+        exit 1
+    fi
 
     # Check if user canceled the selection
     if [[ -z "$value" ]]; then
@@ -510,18 +800,39 @@ prompt_for_directory() {
     config_values[$varname]="$value"
 }
 
-# Function to prompt for a file path with graphical interface (zenity)
+# Function to prompt for a file path with a platform-native graphical interface
 prompt_for_file() {
     local varname=$1
     local prompt=$2
     local default_value=$3
+    local value
 
     echo "$prompt"
 
-    value=$(zenity --file-selection --title="$prompt" --filename="$default_value" 2>/dev/null)
+    if ! value=$(select_file_path "$prompt" "$default_value"); then
+        echo "Unable to open the file selection dialog. Aborting." >&2
+        exit 1
+    fi
 
     if [[ -z "$value" ]]; then
         echo "No file selected. Aborting."
+        exit 1
+    fi
+
+    config_values[$varname]="$value"
+}
+
+# Function to prompt for an optional single file. Cancellation stores an empty value.
+prompt_for_optional_file() {
+    local varname=$1
+    local prompt=$2
+    local default_value=$3
+    local value
+
+    echo "$prompt"
+
+    if ! value=$(select_file_path "$prompt" "$default_value"); then
+        echo "Unable to open the file selection dialog. Aborting." >&2
         exit 1
     fi
 
@@ -545,7 +856,7 @@ prompt_for_value() {
     config_values[$varname]="$value"
 }
 
-# Function to prompt for one or more masks (zenity, multi-selection)
+# Function to prompt for one or more masks (multi-selection)
 prompt_for_masks() {
     local varname=$1
     local prompt=$2
@@ -553,14 +864,11 @@ prompt_for_masks() {
 
     echo "$prompt"
 
-    local start_dir="${default_dir:-$GLOBAL_DIR}"
-    if [[ -z "$start_dir" ]]; then
-        start_dir="$HOME"
-    fi
-    start_dir="${start_dir%/}/"
-
     local selection
-    selection=$(zenity --file-selection --multiple --separator="|" --title="$prompt" --filename="$start_dir" 2>/dev/null)
+    if ! selection=$(select_multiple_file_paths "$prompt" "$default_dir"); then
+        echo "Unable to open the mask selection dialog. Aborting." >&2
+        exit 1
+    fi
 
     config_values[$varname]="$selection"
 }
@@ -597,6 +905,50 @@ write_config_file() {
     done
 }
 
+load_global_config() {
+    local config_path="$1"
+    local required_variables=(GLOBAL_DIR COHORT T1_MNI DIR_RANALYSES LIST_ALL_SUBJECTS)
+    local variable_name
+
+    if [[ -z "$config_path" || ! -f "$config_path" ]]; then
+        echo "Global configuration file not found: ${config_path:-<empty path>}" >&2
+        return 1
+    fi
+
+    # Clear values left by any previously inspected cohort before loading the active one.
+    unset GLOBAL_DIR COHORT T1_MNI DIR_RANALYSES LIST_ALL_SUBJECTS
+    if ! source "$config_path"; then
+        echo "Unable to load global configuration: $config_path" >&2
+        return 1
+    fi
+
+    for variable_name in "${required_variables[@]}"; do
+        if [[ -z "${!variable_name}" ]]; then
+            echo "Global configuration '$config_path' is missing $variable_name." >&2
+            return 1
+        fi
+    done
+
+    if [[ ! -d "$GLOBAL_DIR" ]]; then
+        echo "Configured GLOBAL_DIR is not an accessible directory: $GLOBAL_DIR" >&2
+        return 1
+    fi
+    if [[ ! -f "$T1_MNI" ]]; then
+        echo "Configured T1_MNI file is unavailable: $T1_MNI" >&2
+        return 1
+    fi
+    if [[ ! -d "$DIR_RANALYSES" ]]; then
+        echo "Configured DIR_RANALYSES is not an accessible directory: $DIR_RANALYSES" >&2
+        return 1
+    fi
+    if [[ ! -f "$LIST_ALL_SUBJECTS" || ! -r "$LIST_ALL_SUBJECTS" ]]; then
+        echo "Configured subject list is unavailable or unreadable: $LIST_ALL_SUBJECTS" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 #Function to find files in subject directory
 
 ##############################################################
@@ -605,7 +957,7 @@ write_config_file() {
 # Main function to collect inputs and display summary
 collect_and_confirm_inputs_global() {
     while true; do
-        # Collect inputs using zenity for directories/files and terminal for text
+        # Collect graphical directory/file inputs and terminal text inputs
         config_values[GLOBAL_DIR]=${GLOBAL_DIR}
         prompt_for_value "COHORT" "What is the name of the cohort ?" ""
         prompt_for_file "T1_MNI" "Select the standard space T1 that will be used to display results"
@@ -634,7 +986,10 @@ create_new_config() {
 
     echo "First, let's select the global directory from which all the files and results will be stored FOR THIS COHORT"
 
-    GLOBAL_DIR=$(zenity --file-selection --directory --title="Global dir" --filename="$HOME" 2>/dev/null)
+    if ! GLOBAL_DIR=$(select_directory_path "Global dir" "$HOME"); then
+        echo "Unable to open the global directory selection dialog. Aborting." >&2
+        exit 1
+    fi
 
     # Check if user canceled the selection
     if [[ -z "$GLOBAL_DIR" ]]; then
@@ -653,7 +1008,6 @@ create_new_config() {
             collect_and_confirm_inputs_global
         else
             echo "Let's go to specific configuration then"
-            source config_global.sh
         fi
     else
 
@@ -685,7 +1039,7 @@ create_new_config() {
 # Main function to collect inputs and display summary
 collect_and_confirm_inputs_mrsi() {
     while true; do
-        # Collect inputs using zenity for directories/files and terminal for text
+        # Collect graphical directory/file inputs and terminal text inputs
         prompt_for_directory "NII_DIR_MRSI" "Select the path to subject MRSI files" "${GLOBAL_DIR}"
         # while true; do
         #     prompt_for_value "NII_DIR_MRSI_orga" "Are all the files in one directory (type : \"allinone\") or in a subject directory (type : \"bysubj\")" "bysubj"
@@ -1130,7 +1484,10 @@ mrsi_do() {
         local reference_mrsi
         reference_mrsi=$(get_reference_image_path "mrsi" "${MRSI_FILES_VALIDATED[0]}")
         if [[ -n "$reference_mrsi" ]]; then
-            configure_masks_for_modality "mrsi" "${MRSI_MASK_LIST}" "$reference_mrsi"
+            if ! configure_masks_for_modality "mrsi" "${MRSI_MASK_LIST}" "$reference_mrsi"; then
+                echo "MRSI mask preparation failed. Configuration was not completed." >&2
+                return 1
+            fi
         else
             echo "Unable to determine an MRSI reference image for mask validation."
         fi
@@ -1157,7 +1514,7 @@ mrsi_do() {
 
 collect_and_confirm_inputs_dti() {
     while true; do
-        # Collect inputs using zenity for directories/files and terminal for text
+        # Collect graphical directory/file inputs and terminal text inputs
         prompt_for_directory "NII_DIR_DTI" "Select the path to subject DTI files" "${GLOBAL_DIR}"
         # while true; do
         #     prompt_for_value "NII_DIR_DTI_orga" "Are all the files in one directory (type : \"allinone\") or in a subject directory (type : \"bysubj\")" "bysubj"
@@ -1191,7 +1548,7 @@ collect_and_confirm_inputs_dti() {
             FILES_DTI=(${newfiles})
         fi
 
-        prompt_for_masks "DTI_MASK_LIST" "Select the masks to prepare for DTI (use Ctrl/Cmd for multiple, Cancel to skip)" "${GLOBAL_DIR}/Masques"
+        prompt_for_optional_file "DTI_MASK_LIST" "Select the single primary DTI analysis mask (Cancel to skip)" "${GLOBAL_DIR}/Masques"
 
         # Display the summary in the terminal and prompt for confirmation
         if display_summary_and_confirm; then
@@ -1316,12 +1673,31 @@ dti_do() {
     echo "DTI_FILES_VALIDATED=(${DTI_FILES_VALIDATED[@]})" >>config_dti.sh
 
     if [[ -n "${DTI_MASK_LIST}" && ${#DTI_FILES_VALIDATED[@]} -gt 0 ]]; then
+        parse_mask_entries "${DTI_MASK_LIST}"
+        if [[ ${#PARSED_MASK_ENTRIES[@]} -ne 1 ]]; then
+            echo "DTI requires exactly one primary analysis mask; ${#PARSED_MASK_ENTRIES[@]} were selected." >&2
+            return 1
+        fi
+
         local reference_dti
         reference_dti=$(get_reference_image_path "dti" "${DTI_FILES_VALIDATED[0]}")
         if [[ -n "$reference_dti" ]]; then
-            configure_masks_for_modality "dti" "${DTI_MASK_LIST}" "$reference_dti"
+            if ! configure_masks_for_modality "dti" "${DTI_MASK_LIST}" "$reference_dti"; then
+                echo "DTI mask preparation failed. Configuration was not completed." >&2
+                return 1
+            fi
+            if [[ ${#PREPARED_MASK_PATHS[@]} -ne 1 ]]; then
+                echo "DTI mask preparation did not produce exactly one primary mask." >&2
+                return 1
+            fi
+
+            local dti_mask_filename
+            dti_mask_filename=$(basename "${PREPARED_MASK_PATHS[0]}")
+            printf 'DTI_ANALYSIS_MASK_FILENAME=%q\n' "$dti_mask_filename" >>config_dti.sh
+            echo "Primary DTI analysis mask: $dti_mask_filename"
         else
-            echo "Unable to determine a DTI reference image for mask validation."
+            echo "Unable to determine a DTI reference image for mask validation." >&2
+            return 1
         fi
     else
         echo "No DTI mask list provided or no validated files. Skipping mask preparation for DTI."
@@ -1334,7 +1710,7 @@ dti_do() {
 
 collect_and_confirm_inputs_structural() {
     while true; do
-        # Collect inputs using zenity for directories/files and terminal for text
+        # Collect graphical directory/file inputs and terminal text inputs
         prompt_for_directory "NII_DIR_STRUCTURAL" "Select the path to subject STRUCTURAL files" "${GLOBAL_DIR}"
         while true; do
             prompt_for_value "NII_DIR_STRUCTURAL_orga" "Are all the files in one directory (type : \"allinone\") or in a subject directory (type : \"bysubj\")" "bysubj"
@@ -1432,7 +1808,10 @@ structural_do() {
         local reference_struct
         reference_struct=$(get_reference_image_path "structural" "${STRUCTURAL_FILES_VALIDATED[0]}")
         if [[ -n "$reference_struct" ]]; then
-            configure_masks_for_modality "structural" "${STRUCTURAL_MASK_LIST}" "$reference_struct"
+            if ! configure_masks_for_modality "structural" "${STRUCTURAL_MASK_LIST}" "$reference_struct"; then
+                echo "STRUCTURAL mask preparation failed. Configuration was not completed." >&2
+                return 1
+            fi
         else
             echo "Unable to determine a STRUCTURAL reference image for mask validation."
         fi
@@ -1467,6 +1846,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Path to VLAD_configs.sh
 vlad_config="VLAD_configs.txt"
+active_global_config=""
 
 # Check if VLAD_configs.sh exists
 if [[ -f "$vlad_config" ]]; then
@@ -1483,9 +1863,17 @@ if [[ -f "$vlad_config" ]]; then
     for i in "${!config_files[@]}"; do
         config_file="${config_files[$i]}"
         if [[ -f "$config_file" ]]; then
-            # Source the config file to get the COHORT variable
-            source "$config_file"
-            echo "$((i + 1))) COHORT: $COHORT (File: $config_file)"
+            # Read the cohort name in a subshell so this does not alter active state.
+            cohort_name=$(
+                unset COHORT
+                source "$config_file" || exit 1
+                printf '%s' "$COHORT"
+            )
+            if [[ $? -eq 0 && -n "$cohort_name" ]]; then
+                echo "$((i + 1))) COHORT: $cohort_name (File: $config_file)"
+            else
+                echo "$((i + 1))) Error: Config file $config_file has no valid COHORT."
+            fi
         else
             echo "$((i + 1))) Error: Config file $config_file not found."
         fi
@@ -1502,36 +1890,42 @@ if [[ -f "$vlad_config" ]]; then
     if [[ $selection -ge 1 && $selection -le ${#config_files[@]} ]]; then
         selected_file="${config_files[$((selection - 1))]}"
 
-        # Source the selected config file
         if [[ -f "$selected_file" ]]; then
-            source "$selected_file"
-            echo "Sourced: $selected_file"
+            active_global_config="$selected_file"
         else
             echo "Error: Selected config file $selected_file not found."
+            exit 1
         fi
     elif [[ $selection -eq $((${#config_files[@]} + 1)) ]]; then
         # Create a new config
-        create_new_config
-        if [[ $? -ne 0 ]]; then
+        if ! create_new_config; then
             echo "There has been a bug, exiting"
             exit 1
         else
-            echo "${GLOBAL_DIR}/config_global.sh" >>${script_dir}/VLAD_configs.txt
+            active_global_config="${GLOBAL_DIR}/config_global.sh"
+            echo "$active_global_config" >>"${script_dir}/VLAD_configs.txt"
         fi
     else
         echo "Invalid selection. Exiting."
+        exit 1
     fi
 else
     echo "VLAD_configs.sh not found. Creating a new one..."
     touch "$vlad_config"
-    create_new_config
-    if [[ $? -ne 0 ]]; then
+    if ! create_new_config; then
         echo "There has been a bug, exiting"
         exit 1
     else
-        echo "${GLOBAL_DIR}/config_global.sh" >>${script_dir}/VLAD_configs.txt
+        active_global_config="${GLOBAL_DIR}/config_global.sh"
+        echo "$active_global_config" >>"${script_dir}/VLAD_configs.txt"
     fi
 fi
+
+if ! load_global_config "$active_global_config"; then
+    echo "Unable to activate the selected cohort. Exiting." >&2
+    exit 1
+fi
+echo "Sourced: $active_global_config"
 
 #############GLOBAL#######
 # Associative array to store variable names and values
