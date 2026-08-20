@@ -74,35 +74,44 @@ def plot_slices(orientation, axes, start_index):
     # Get the indices where the data exceeds the threshold
     significant_indices = np.where(data > threshold)
 
-    # Get the unique indices along the orientation axis
-    unique_indices = np.unique(significant_indices[axis_index])
+    # If there are no significant voxels, leave this orientation blank.
+    if significant_indices[0].size == 0:
+        for i in range(9):
+            row, col = generate_coordinates(start_index + i + 1)
+            axes[row, col].axis('off')
+        return
 
-    # If there are significant voxels, proceed
-    if len(unique_indices) > 0:
-        # Convert indices to coordinates
-        coords = nib.affines.apply_affine(affine, np.eye(4)[:3, :3][axis_index] * unique_indices[:, np.newaxis])
+    # Project every significant voxel onto the requested world-space axis.
+    # Selecting the corresponding affine row avoids mixing x, y, and z values
+    # when determining the range passed to Nilearn's cut_coords argument.
+    coords = (
+        affine[axis_index, 0] * significant_indices[0]
+        + affine[axis_index, 1] * significant_indices[1]
+        + affine[axis_index, 2] * significant_indices[2]
+        + affine[axis_index, 3]
+    )
 
-        min_coord = coords.min()
-        max_coord = coords.max()
+    min_coord = coords.min()
+    max_coord = coords.max()
 
-        # Compute the range and the central 80%
-        coord_range = max_coord - min_coord
-        adjusted_min = min_coord + 0.4 * coord_range
-        adjusted_max = max_coord - 0.1 * coord_range
+    # Compute the range and the central 80%
+    coord_range = max_coord - min_coord
+    adjusted_min = min_coord + 0.4 * coord_range
+    adjusted_max = max_coord - 0.1 * coord_range
 
-        # Check if significant coordinates cover at least the central 80%
-        sig_coords = coords[(coords >= adjusted_min) & (coords <= adjusted_max)]
-        if len(sig_coords) > 0:
-            min_plot = adjusted_min
-            max_plot = adjusted_max
-        else:
-            min_plot = min_coord
-            max_plot = max_coord
+    # Check if significant coordinates cover at least the central 80%
+    sig_coords = coords[(coords >= adjusted_min) & (coords <= adjusted_max)]
+    if len(sig_coords) > 0:
+        min_plot = adjusted_min
+        max_plot = adjusted_max
+    else:
+        min_plot = min_coord
+        max_plot = max_coord
 
-        # Generate 12 slices within the determined range
-        slices = np.linspace(min_plot, max_plot, 9)
+    # Generate 9 slices within the determined range
+    slices = np.linspace(min_plot, max_plot, 9)
 
-        # Choose colormap
+    # Choose colormap
     if colormap == '1':
         cmap = 'Reds'
     elif colormap == '2':
@@ -165,6 +174,4 @@ plt.subplots_adjust(wspace=0, hspace=0)
 plt.savefig(output_image_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
 plt.close()
 #plt.show()
-
-
 
