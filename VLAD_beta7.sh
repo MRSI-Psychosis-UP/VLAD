@@ -403,7 +403,7 @@ display_help() {
     echo "  -d, --description        ONLY for STRUCTURAL or DTI : select the description of files you want to do the analysis. If nothing is put here, all the validated files will be analyzed"
     echo ""
     echo "  -p, --perm <value>	     Number of permutations By default 300"
-    echo "  --cards	[value]          Will force to do the 4D cards. This option also permits to use a different suffix than the default \"filled\" for cards. Just add an argument after it :-). If empty, will do the filled."
+    echo "  --cards                  Force creation of 4D cards. MRSI input descriptions come from config_mrsi.sh."
     echo "  --mask <value>           MRSI/structural tissue-mask presets only. DTI always uses the primary mask recorded during preparation. Values: wmgm / wmgmbg / onlygrey / onlywhite / cerebellum / onlygreydetail"
     echo "  --qualithresh <value>    Quality threshold (%of subject) to mask the WM_GM / WM / GM masks on analysis (put the %age of subject, for eg if 50%, put --qualithresh 50)"
     echo "  --smooth                 Force smoothing of cards before analysis masking, including MRSI. Specify sigma after it; default = 1."
@@ -723,8 +723,8 @@ while [[ $# -gt 0 ]]; do
         if [[ $2 == -* || -z $2 ]]; then
             shift
         else
-            MODALITYprompted="$2"
-            shift 2
+            echo "--cards no longer accepts a filename argument. Set MRSI_ANALYSIS_DESCRIPTION in config_mrsi.sh." >&2
+            exit 1
         fi
         ;;
     --noparallel)
@@ -878,6 +878,38 @@ else
     select_cohort
 fi
 
+# Older Prep configs contain only the validated descriptions.
+resolve_mrsi_analysis_description() {
+    local selected="${MRSI_ANALYSIS_DESCRIPTION:-}" description
+    local candidates=()
+    if [[ -z "$selected" ]]; then
+        for description in "${MRSI_FILES_VALIDATED[@]}"; do
+            case "$description" in
+                crlb | Qmask | QMask | qmask | qMask) continue ;;
+            esac
+            candidates+=("$description")
+        done
+        if (( ${#candidates[@]} != 1 )); then
+            echo "Cannot select an MRSI concentration description. Set MRSI_ANALYSIS_DESCRIPTION in config_mrsi.sh to one validated concentration description, or rerun Prep_VLAD_b6.1.sh. Candidates: ${candidates[*]:-<none>}" >&2
+            return 1
+        fi
+        selected="${candidates[0]}"
+    fi
+    case "$selected" in
+        crlb | Qmask | QMask | qmask | qMask)
+            echo "MRSI_ANALYSIS_DESCRIPTION must identify concentration data, not '$selected'." >&2
+            return 1 ;;
+    esac
+    for description in "${MRSI_FILES_VALIDATED[@]}"; do
+        if [[ "$selected" == "$description" ]]; then
+            printf '%s\n' "$selected"
+            return 0
+        fi
+    done
+    echo "MRSI_ANALYSIS_DESCRIPTION '$selected' was not validated. Correct config_mrsi.sh or rerun Prep_VLAD_b6.1.sh." >&2
+    return 1
+}
+
 # Source the selected config file
 if [[ -f "$selected_file" ]]; then
     source "$selected_file"
@@ -917,7 +949,7 @@ mrsi)
     EXTRA_TAGS_SETTING=${MRSI_EXTRA_TAGS:-}
 
     data_type="mrsi" #to add to config
-    acquisition="signal_filtbiharmonic_pvcorr"
+    acquisition=$(resolve_mrsi_analysis_description) || exit 1
 
     # NORMALLY WILL BE QUICKLY USELESS
     QMASKS=(Qmask QMask qmask qMask) # To change and to add to config but for the moment it will do the job
@@ -1040,28 +1072,6 @@ mrsi)
         TODO+=(${METABQUOTIENTS[@]})
     fi
 
-    # TO BE QUICLY REMOVED 
-    # if [[ -z ${MODALITYprompted} ]]; then
-    #     if [[ ${CONFIRMATION} == true ]]; then
-    #         acquisition="signal_filtbiharmonic"
-    #     else
-
-    #         if [[ " ${MRSI_FILES_VALIDATED[@]} " =~ " ${MODALITY} " ]]; then
-    #             acquisition=${MODALITY}
-    #         else
-    #             echo "${MODALITY} not found in the validated files for MRSI, please specify a valid file to work on after the argument --cards"
-    #             exit 1
-    #         fi
-    #     fi
-    # else
-    #     if [[ " ${MRSI_FILES_VALIDATED[@]} " =~ " ${MODALITYprompted} " ]]; then
-    #         acquisition=${MODALITYprompted}
-    #     else
-    #         echo "${MODALITYprompted} not found in the validated files for MRSI, please specify a valid file to work on after the argument --cards"
-    #         exit 1
-    #     fi
-    # fi
-
     ;;
 dti)
     source config_dti.sh
@@ -1080,7 +1090,6 @@ dti)
         COMPRESSION=""
     fi
 
-    local dti_data_suffix
     dti_data_suffix=$(trim_whitespace "${DTI_DATA_SUFFIX:-dwi}")
     BIDS_INFIX_SETTING=$(resolve_bids_infix "${DTI_BIDS_INFIX:-}" "${DTI_SPACE_LABEL:-mni}" "${DTI_EXTRA_TAGS:-}" "${DTI_ACQ_LABEL:-dti}")
 
@@ -1120,7 +1129,6 @@ structural)
         COMPRESSION=""
     fi
 
-    local struct_data_suffix
     struct_data_suffix=$(trim_whitespace "${STRUCTURAL_DATA_SUFFIX:-T1w}")
     BIDS_INFIX_SETTING=$(resolve_bids_infix "${STRUCTURAL_BIDS_INFIX:-}" "${STRUCTURAL_SPACE_LABEL:-mni}" "${STRUCTURAL_EXTRA_TAGS:-}" "${STRUCTURAL_ACQ_LABEL:-memprage}")
 
@@ -1402,13 +1410,13 @@ checkmatrix_4d() {
 
     if [[ ! -f "${card_path}" ]]; then
         echo "4D card for matrix compatibility check not found: ${card_path}"
-        exit 1
+        return 1
     fi
 
     check4D=$(fslval "${card_path}" dim4)
     if [[ -z "${check4D}" ]]; then
         echo "Unable to read dim4 from 4D card for matrix compatibility check: ${card_path}"
-        exit 1
+        return 1
     fi
     value=$(grep '/NumPoints' ${GLOBAL_DIR}/Results/${NAME}/${MATRIX}.mat | awk '{print $2}')
     #echo "$value"
@@ -1419,7 +1427,7 @@ checkmatrix_4d() {
         echo "The problem probably resides in missing values in your database. More / less missing values with this analysis than the previous one."
         echo "If you are very nice to the programmer of this shit, he will maybe do the relaunch of VLAD automatic in the next version ;-)"
         #echo "Deleting the matrix you just done"
-        exit 0
+        return 1
         # cd ${GLOBAL_DIR}/Results/${NAME} -> we will check if this works before deleting all haha
         # rm ${MATRIX}.csv
         # rm ${MATRIX}.mat
@@ -1930,86 +1938,112 @@ wrap4dcards() { # This needs to be more flexible...
 
 }
 
-wrapmasksmrsi() {
-    #### No need for reslicing anymore :-)
+build_required_mrsi_qmasks() {
+    local analysis_item quotient required existing
+    local is_quotient
 
-    ## DUE TO PROBLEMS : MAYBE WE ADD AN OPTION TO RESLICE THE HARVARD-OXFORD MASK TO A SPECIFIC MNI..? A very basic flirt.
+    MetabQMask=()
+    for analysis_item in "${TODO[@]}"; do
+        is_quotient=false
+        for quotient in "${METABQUOTIENTS[@]}"; do
+            if [[ "$analysis_item" == "$quotient" ]]; then
+                is_quotient=true
+                break
+            fi
+        done
 
-    #Making 4D Qmasks here now
-    TARGET_DIR="${GLOBAL_DIR}/Cartes4D/${NAME}"
-
-    MetabQMask=(${METAB[@]})
-    if [[ ${SUM} == true || ${QUOTIENTS} == true ]]; then
-        MetabQMask+=("${SUM_METAB_LABEL}")
-    fi
-
-    for MET in ${MetabQMask[@]}; do
-        qmask4dtodo=$(name_4d_file_mrsi "${data_type}" "${qmask_val}" "${MET}" "${NAME}")
-        if [[ $? -ne 0 ]]; then
-            echo "Error naming 4D file at the checking for 4D card"
-            exit 1
+        if [[ "$is_quotient" == true ]]; then
+            required="$SUM_METAB_LABEL"
+        else
+            required=$(strip_ratio_suffix "$analysis_item")
         fi
-        if [[ ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${qmask4dtodo} ]]; then
+
+        [[ -n "$required" ]] || continue
+        for existing in "${MetabQMask[@]}"; do
+            [[ "$existing" == "$required" ]] && continue 2
+        done
+        MetabQMask+=("$required")
+    done
+}
+
+wrapmasksmrsi() {
+    # QMask inputs remain in the MRSI tree; their 4D cards live with other cards.
+    local TARGET_DIR="${GLOBAL_DIR}/Cartes4D/${NAME}"
+    local MET qmask4dtodo SUBJ sub visit file_subject FILE_PATH staged_file
+    local QMASK4D mask_filename mask_file
+    local subject_qmask_files=()
+
+    build_required_mrsi_qmasks
+    if (( ${#MetabQMask[@]} == 0 )); then
+        echo "No MRSI QMask is required for the current analysis selection."
+        return 0
+    fi
+    mkdir -p "$TARGET_DIR"
+
+    for MET in "${MetabQMask[@]}"; do
+        qmask4dtodo=$(name_4d_file_mrsi "${data_type}" "${MET}" "${qmask_val}" "${NAME}")
+        if [[ $? -ne 0 || -z "$qmask4dtodo" ]]; then
+            echo "Error naming the 4D QMask for ${MET}." >&2
+            return 1
+        fi
+
+        if [[ ! -f "${TARGET_DIR}/${qmask4dtodo}" ]]; then
             echo "Creating QMask for ${MET}"
-            for SUBJ in ${SUBJECTS[@]}; do
+            subject_qmask_files=()
+            for SUBJ in "${SUBJECTS[@]}"; do
                 sub=${SUBJ%_*}
                 visit=${SUBJ#*_}
-
-                file_subject=$(name_subject_file_mrsi "${sub}" "${visit}" "${data_type}" "${MET}" "${qmask_val}" "${COMPRESSION}")
-                if [[ $? -ne 0 ]]; then
-                    echo "An error occurred while running name_subject_file. Exiting script."
-                    exit 1 # Exit script if the function returns an error
-                fi
-
-                cd ${nii_cards}
-                FILE_PATH=""
+                file_subject=$(name_subject_file_mrsi "${sub}" "${visit}" "${data_type}" "${MET}" "${qmask_val}" "${COMPRESSION}") || return 1
                 FILE_PATH=$(find "${nii_cards}" -type f -name "$file_subject" 2>/dev/null | head -n 1)
                 if [[ -z "$FILE_PATH" ]]; then
-                    echo "File for $SUBJ not found, exiting to avoid further errors"
-                    exit 1
-                else
-                    cp "$FILE_PATH" "${TARGET_DIR}/${sub}-${visit}-${qmask_val}-${MET}.nii${COMPRESSION}"
+                    echo "QMask file for $SUBJ and $MET not found, exiting to avoid further errors." >&2
+                    rm -f "${subject_qmask_files[@]}"
+                    return 1
                 fi
+                staged_file="${TARGET_DIR}/${sub}-${visit}-${qmask_val}-${MET}.nii${COMPRESSION}"
+                if ! cp "$FILE_PATH" "$staged_file"; then
+                    rm -f "${subject_qmask_files[@]}"
+                    return 1
+                fi
+                subject_qmask_files+=("$staged_file")
             done
-            cd $TARGET_DIR
 
-            card4dtodo=$(name_4d_file_mrsi "${data_type}" "${MET}" "${qmask_val}" "${NAME}")
+            if ! fslmerge -t "${TARGET_DIR}/${qmask4dtodo}" "${subject_qmask_files[@]}"; then
+                echo "Unable to create 4D QMask for ${MET}." >&2
+                rm -f "${subject_qmask_files[@]}"
+                return 1
+            fi
+            rm -f "${subject_qmask_files[@]}"
+        else
+            echo "4D QMask for ${MET} already exists; checking matrix compatibility."
+        fi
 
-            fslmerge -t ${card4dtodo} *-${qmask_val}-${MET}.nii${COMPRESSION}
-
-            rm -f *-${qmask_val}-${MET}.nii${COMPRESSION}
+        # Apply the same subject-count check used for the other 4D cards.
+        if ! checkmatrix_4d "$qmask4dtodo"; then
+            return 1
         fi
     done
 
-    # Making the global quali masks to analyze only on these portions
     echo "==== Global quality masks for MRSI + GM/WM for randomise ===="
-    cd ${GLOBAL_DIR}
+    mkdir -p "${GLOBAL_DIR}/Results/${NAME}"
+    cd "${GLOBAL_DIR}/Results/${NAME}" || return 1
 
-    mkdir -p Results/${NAME}
-    cd Results/${NAME}
+    for MET in "${MetabQMask[@]}"; do
+        QMASK4D=$(name_4d_file_mrsi "${data_type}" "${MET}" "${qmask_val}" "${NAME}") || return 1
+        fslmaths "${TARGET_DIR}/${QMASK4D}" -Tmean "${MET}_QMask_mean" || return 1
+        fslmaths "${MET}_QMask_mean.nii.gz" -thr "0.${QUALITRESH}" -bin "${MET}_Qmask_thr${QUALITRESH}" || return 1
 
-    for MET in ${MetabQMask[@]}; do
-
-        #Creation d'un masque où >68% (ou selon le quality tresh decidé) des sujets ont des données
-        QMASK4D=$(name_4d_file_mrsi ${data_type} ${MET} ${qmask_val} ${NAME})
-        fslmaths ${GLOBAL_DIR}/Cartes4D/${NAME}/${QMASK4D} -Tmean ${MET}_QMask_mean
-        fslmaths ${MET}_QMask_mean.nii.gz -thr 0.${QUALITRESH} -bin ${MET}_Qmask_thr${QUALITRESH}
-
-        for MASK in ${MASKS[@]}; do
-            local mask_filename="HarvardOxford-${MASK}.nii.gz"
-            local mask_file
+        for MASK in "${MASKS[@]}"; do
+            mask_filename="HarvardOxford-${MASK}.nii.gz"
             mask_file=$(get_mask_file_path "$mask_filename" "mrsi")
             if [[ -z "$mask_file" ]]; then
-                echo "Mask $mask_filename not found for cohort ${COHORT} (modality mrsi). Aborting."
-                exit 1
+                echo "Mask $mask_filename not found for cohort ${COHORT} (modality mrsi). Aborting." >&2
+                return 1
             fi
-            fslmaths "${mask_file}" -mul ${MET}_Qmask_thr${QUALITRESH} ${MET}_${NAME}mask${MASK}_quali
+            fslmaths "$mask_file" -mul "${MET}_Qmask_thr${QUALITRESH}" "${MET}_${NAME}mask${MASK}_quali" || return 1
         done
-        rm ${MET}_QMask_mean.nii.gz
-        rm ${MET}_Qmask_thr${QUALITRESH}.nii.gz
-
+        rm -f "${MET}_QMask_mean.nii.gz" "${MET}_Qmask_thr${QUALITRESH}.nii.gz"
     done
-
 }
 
 unique_masking() { # Must be adapted
@@ -2382,7 +2416,7 @@ randoextract() {
     #cd $MET
     #Checking for quali QMask
     if [[ ! -e "${QUALIMASK}" && ${type_images} == "mrsi" ]]; then
-        wrapmasksmrsi
+        wrapmasksmrsi || exit 1
     fi
 
     # Doing specific masking if required
@@ -2529,7 +2563,7 @@ sweprocess() {
     #cd $MET
     #Checking for quali QMask
     if [[ ! -e "${QUALIMASK}" && ${type_images} == "mrsi" ]]; then
-        wrapmasksmrsi
+        wrapmasksmrsi || exit 1
     fi
 
     #Checking for 4D card
@@ -2700,10 +2734,10 @@ if [[ ${PREPARE} == true ]]; then
             wrap4dcards ${data_type} ${acquisition} ${cardtodo}
 
             echo "Checking matrix and 4D card compatibility"
-            checkmatrix_4d ${card4dtocheck}
+            checkmatrix_4d "${card4dtocheck}" || exit 1
         else
             echo "Checking matrix and 4D card compatibility"
-            checkmatrix_4d ${card4dtocheck}
+            checkmatrix_4d "${card4dtocheck}" || exit 1
         fi
     done
 else
@@ -2782,7 +2816,7 @@ if [[ ${RANDOMISING} == true ]]; then
     # done
 
     if [[ ${type_images} == "mrsi" ]]; then
-        wrapmasksmrsi
+        wrapmasksmrsi || exit 1
     fi
 
     
