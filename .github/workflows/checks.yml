@@ -1,0 +1,25 @@
+name: Source and environment checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install uv==0.13.7
+      - run: uv sync --locked --python "$(command -v python)" --no-dev
+      - run: ./scripts/check.sh
+      - run: .venv/bin/vlad doctor --profile python
+      - run: uv build

@@ -1,34 +1,42 @@
-# Track only the VLAD bash workflow source files and installation metadata.
-*
-
-# Repository metadata.
-!.gitignore
-!README.md
-!requirements.txt
-!requirements.R
-!install_R_packages.R
-!VLAD_configs.example.txt
-
-# Standard masks shipped with VLAD.
-!Masks/
-!Masks/**
-
-# VLAD source files.
-!VLAD_beta7.sh
-!Prep_VLAD_b6.1.sh
-!create_matrix_randoMRSI_beta7.py
-!create_matrix_VLADlov_swe_alpha2.py
-!create_matrix_VLADlov_afni_alpha1.py
-!resample_masks_b3_replace.py
-!snapshot_results_randomise_beta5.py
-!Randomise_sum_up_v3.Rmd
-!SWE_sum_up_v1.5.2.Rmd
-
-# Local state and nested development repository.
-VLAD_py/
-VLAD_configs.txt
-VLAD_batch_commands.txt
-.DS_Store
-Rplots.pdf
+# Python build and development state.
+.venv/
+.tools/
+.local/
+.cache/
 __pycache__/
 *.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+htmlcov/
+.coverage*
+
+# Private machine/cohort configuration and generated analysis output.
+VLAD_configs.txt
+VLAD_configs.txt.lock
+VLAD_batch_commands.txt
+.env
+.env.*
+!.env.example
+config/*.local.*
+Cartes4D/
+Masques/
+Results/
+Listes/
+Rplots.pdf
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+
+# Separate application and local/editor infrastructure.
+VLAD_py/
+.agents/
+.codex/
+.aws/
+.vscode/
+.idea/
+.DS_Store
+*.swp

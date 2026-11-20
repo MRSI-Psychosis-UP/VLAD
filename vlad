@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Checkout launcher: installation activation and shell profile edits are optional.
+set -e
+
+VLAD_LAUNCH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -x "${VLAD_LAUNCH_ROOT}/.venv/bin/vlad" ||
+      ! -x "${VLAD_LAUNCH_ROOT}/.venv/bin/python" ]]; then
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        echo "VLAD: voxel-based analysis and Python reports."
+        echo "Install with: ${VLAD_LAUNCH_ROOT}/install.sh"
+        echo "Then use: ${VLAD_LAUNCH_ROOT}/vlad --help"
+        exit 0
+    fi
+    echo "VLAD is not installed. Run ${VLAD_LAUNCH_ROOT}/install.sh first." >&2
+    exit 1
+fi
+
+if [[ -f "${VLAD_LAUNCH_ROOT}/.local/runtime.env" ]]; then
+    source "${VLAD_LAUNCH_ROOT}/.local/runtime.env"
+fi
+VLAD_LAUNCH_BASH="${VLAD_INSTALL_BASH:-$(command -v bash || true)}"
+if [[ ! -x "$VLAD_LAUNCH_BASH" ]]; then
+    echo "Configured Bash is unavailable. Re-run ${VLAD_LAUNCH_ROOT}/install.sh." >&2
+    exit 1
+fi
+
+export VLAD_HOME="${VLAD_HOME:-$VLAD_LAUNCH_ROOT}"
+exec "$VLAD_LAUNCH_BASH" -c '
+    launch_root=$1
+    shift
+    # Reporting itself needs no modern Bash. Keep this allowance local to
+    # launcher setup; analysis/preparation children retain the Bash 4 guard.
+    VLAD_RUNTIME_PYTHON_ONLY=true
+    export -n VLAD_RUNTIME_PYTHON_ONLY
+    source "$launch_root/workflows/common.sh" || exit $?
+    unset VLAD_RUNTIME_PYTHON_ONLY
+    exec "$launch_root/.venv/bin/vlad" "$@"
+' vlad "$VLAD_LAUNCH_ROOT" "$@"

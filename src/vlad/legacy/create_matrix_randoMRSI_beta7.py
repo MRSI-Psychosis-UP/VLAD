@@ -468,7 +468,7 @@ def read_and_export_columns(file_path, selected_sheet, output_dir, matrix_name, 
     # Also write data with column names to a CSV file for R
     csv_output_file = os.path.join(output_dir, f"{matrix_name}.csv")
     df_selected.to_csv(csv_output_file, index=False, sep='\t')
-    print(f"Data for R exported to {csv_output_file}")
+    print(f"Report data exported to {csv_output_file}")
 
     return main_variable, names_main_matrix
 

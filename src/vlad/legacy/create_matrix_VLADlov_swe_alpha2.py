@@ -536,7 +536,7 @@ def main():
         rename_map[group_col] = "group"
     csv_df.rename(columns=rename_map, inplace=True)
     csv_df.to_csv(csv_path, sep="\t", index=False)
-    print(f"Data for R exported to {csv_path}")
+    print(f"Report data exported to {csv_path}")
 
     print("All done.")
 

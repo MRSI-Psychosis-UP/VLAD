@@ -1,39 +1,16 @@
 #!/usr/bin/env bash
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# VLAD requires associative arrays and other features introduced in Bash 4.
-# If an older Bash launched this script, restart it with a compatible interpreter
-# already installed on the system. This does not change the user's login shell.
-if ((BASH_VERSINFO[0] < 4)); then
-    compatible_bash=""
-    path_bash=$(command -v bash 2>/dev/null || true)
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: vlad prep [--b0 3|7] [--overwrite] [--config PATH --modality MRSI|DTI|STRUCTURAL --non-interactive [--subjects PATH]]"
+    echo "Interactive cohort setup; requires FSL, Python with Tk, zenity and a display."
+    echo "Registry: $VLAD_CONFIG_FILE (override with VLAD_CONFIG_FILE)."
+    exit 0
+fi
 
-    for candidate in \
-        "${VLAD_BASH_BIN:-}" \
-        "$path_bash" \
-        /opt/homebrew/bin/bash \
-        /usr/local/bin/bash \
-        /usr/bin/bash \
-        /bin/bash; do
-        [[ -n "$candidate" && -x "$candidate" ]] || continue
-        if "$candidate" -c '((BASH_VERSINFO[0] >= 4))' >/dev/null 2>&1; then
-            compatible_bash="$candidate"
-            break
-        fi
-    done
-
-    if [[ -z "$compatible_bash" ]]; then
-        printf 'Error: %s requires Bash 4 or newer (currently Bash %s).\n' "$(basename "${BASH_SOURCE[0]}")" "$BASH_VERSION" >&2
-        printf 'Install a newer Bash (on macOS: brew install bash), or set VLAD_BASH_BIN=/path/to/bash.\n' >&2
-        exit 1
-    fi
-
-    script_path="${BASH_SOURCE[0]}"
-    if [[ "$script_path" != /* ]]; then
-        script_path="$(cd "$(dirname "$script_path")" && pwd)/$(basename "$script_path")"
-    fi
-
-    printf 'Restarting %s with Bash %s at %s.\n' "$(basename "$script_path")" "$("$compatible_bash" -c 'printf "%s" "$BASH_VERSION"')" "$compatible_bash" >&2
-    exec "$compatible_bash" "$script_path" "$@"
+if [[ -n "${VLAD_PYTHON_ENV:-}" && -z "${VLAD_PYTHON_BIN:-}" ]]; then
+    pyenv_prefix=$(pyenv prefix "$VLAD_PYTHON_ENV") || exit 1
+    VLAD_PYTHON_BIN="${pyenv_prefix}/bin/python"
 fi
 
 METABSUM3T=("NAANAAG" "CrPCr" "GPCPCh" "Ins" "GluGln")
@@ -42,9 +19,31 @@ METABSUM7T9=("NAA" "NAAG" "CrPCr" "Glu" "Gln" "Ins" "GPCPCh" "GSH" "GABA")
 
 OVERWRITE=false
 B0_MODE="3"
+NONINTERACTIVE=false
+PREP_CONFIG=""
+PREP_MODALITY=""
+PREP_SUBJECTS=""
+PREP_FAILED=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+    --non-interactive)
+        NONINTERACTIVE=true
+        shift
+        ;;
+    --config|--modality|--subjects)
+        [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "$1 requires a value." >&2; exit 1; }
+        if [[ "$1" == --config ]]; then
+            PREP_CONFIG="$2"
+            [[ "$PREP_CONFIG" = /* ]] || PREP_CONFIG="${PWD}/${PREP_CONFIG}"
+        elif [[ "$1" == --modality ]]; then
+            PREP_MODALITY="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+        else
+            PREP_SUBJECTS="$2"
+            [[ "$PREP_SUBJECTS" = /* ]] || PREP_SUBJECTS="${PWD}/${PREP_SUBJECTS}"
+        fi
+        shift 2
+        ;;
     --overwrite)
         OVERWRITE=true
         shift
@@ -70,6 +69,11 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+
+if [[ -n "$PREP_SUBJECTS" && "$NONINTERACTIVE" != true ]]; then
+    echo "--subjects requires --config, --modality and --non-interactive for BIDS derivative preparation." >&2
+    exit 1
+fi
 
 # current_dir="/Volumes/MindfulMRSI"
 # NAME="bestofsubjects"
@@ -384,7 +388,7 @@ run_resample_and_copy_mask() {
     ensure_mask_python || return 1
 
     local resample_output
-    if ! resample_output=$("$PREP_MASK_PYTHON" "${script_dir}/resample_masks_b3_replace.py" --masks "$mask_path" --t1 "$reference_image" --output "$destination" --interp nearest 2>&1); then
+    if ! resample_output=$("$PREP_MASK_PYTHON" "${PYTHON_HELPERS}/resample_masks_b3_replace.py" --masks "$mask_path" --t1 "$reference_image" --output "$destination" --interp nearest 2>&1); then
         echo "Resampling failed for $mask_path"
         echo "$resample_output"
         return 1
@@ -913,7 +917,7 @@ write_config_file() {
 
 load_global_config() {
     local config_path="$1"
-    local required_variables=(GLOBAL_DIR COHORT T1_MNI DIR_RANALYSES LIST_ALL_SUBJECTS)
+    local required_variables=(GLOBAL_DIR COHORT)
     local variable_name
 
     if [[ -z "$config_path" || ! -f "$config_path" ]]; then
@@ -939,15 +943,15 @@ load_global_config() {
         echo "Configured GLOBAL_DIR is not an accessible directory: $GLOBAL_DIR" >&2
         return 1
     fi
-    if [[ ! -f "$T1_MNI" ]]; then
+    if [[ -n "${T1_MNI:-}" && ! -f "$T1_MNI" ]]; then
         echo "Configured T1_MNI file is unavailable: $T1_MNI" >&2
         return 1
     fi
-    if [[ ! -d "$DIR_RANALYSES" ]]; then
+    if [[ -n "${DIR_RANALYSES:-}" && ! -d "$DIR_RANALYSES" ]]; then
         echo "Configured DIR_RANALYSES is not an accessible directory: $DIR_RANALYSES" >&2
         return 1
     fi
-    if [[ ! -f "$LIST_ALL_SUBJECTS" || ! -r "$LIST_ALL_SUBJECTS" ]]; then
+    if [[ -n "${LIST_ALL_SUBJECTS:-}" && ( ! -f "$LIST_ALL_SUBJECTS" || ! -r "$LIST_ALL_SUBJECTS" ) ]]; then
         echo "Configured subject list is unavailable or unreadable: $LIST_ALL_SUBJECTS" >&2
         return 1
     fi
@@ -972,7 +976,7 @@ collect_and_confirm_inputs_global() {
             config_values[T1_MNI]="${config_values[T1_MNI]%.gz}"
         fi
 
-        prompt_for_directory "DIR_RANALYSES" "Where do you want your results from R be stored ?" ""
+        prompt_for_directory "DIR_RANALYSES" "Where should report data and plots be exported?" ""
         prompt_for_file "LIST_ALL_SUBJECTS" "Select the .txt file with the list of ALL the subjects you have in your cohort (SUBJECT_VISIT)" "${config_values[GLOBAL_DIR]}"
 
         echo "Here is a summary of the informations for the GLOBAL configuration for VLAD in this cohort"
@@ -1003,7 +1007,7 @@ create_new_config() {
         exit 1
     fi
 
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || exit 1
     echo "we are here $(pwd)"
     # Check if config file exists and prompt in the terminal for overwriting
     if [[ -f config_global.sh ]]; then
@@ -1030,7 +1034,7 @@ create_new_config() {
     fi
 
     #Making directories
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || exit 1
     mkdir -p Cartes4D
     mkdir -p Masques
     mkdir -p Results
@@ -1298,7 +1302,7 @@ process_mrsi_nii() {
         append_unique METAB_EXPORT "$m"
     done
 
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || exit 1
     if [[ -f config_global.sh ]]; then
         source config_global.sh
     else
@@ -1376,6 +1380,7 @@ process_mrsi_nii() {
                 if fslmaths ${COMMAND_SUM[@]}; then
                     sum_ok=true
                 else
+                    PREP_FAILED=true
                     echo "Error for ${sum_label} for $SUBJ"
                 fi
             else
@@ -1396,6 +1401,7 @@ process_mrsi_nii() {
                         METABSUM_ACTIVE+=("${MET}${ratio_suffix}")
                         append_unique METABSUM_EXPORT "${MET}${ratio_suffix}"
                     else
+                        PREP_FAILED=true
                         echo "Error for RatioSum of $MET for $SUBJ"
                     fi
                 done
@@ -1499,23 +1505,27 @@ process_mrsi_nii() {
 
 mrsi_do() {
     declare -A config_values
-    cd $GLOBAL_DIR
+    cd "$GLOBAL_DIR" || exit 1
 
-    # Check if config file exists and prompt in the terminal for overwriting
-    if [[ -f config_mrsi.sh ]]; then
-        read -p "config_mrsi.sh already exists. Do you want to overwrite it? (yes/no):  " overwrite
-        if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
-            echo "Aborting."
-            exit 1
+    if [[ "$NONINTERACTIVE" == false ]]; then
+        # Check if config file exists and prompt in the terminal for overwriting
+        if [[ -f config_mrsi.sh ]]; then
+            read -p "config_mrsi.sh already exists. Do you want to overwrite it? (yes/no):  " overwrite
+            if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
+                echo "Aborting."
+                exit 1
+            fi
         fi
+
+        collect_and_confirm_inputs_mrsi
+        if [[ $? -ne 0 ]]; then
+            echo "There has been an error generating the configuration file"
+            break
+        fi
+
+        cd "${GLOBAL_DIR}" || exit 1
     fi
 
-    if ! collect_and_confirm_inputs_mrsi; then
-        echo "There has been an error generating the configuration file" >&2
-        return 1
-    fi
-
-    cd ${GLOBAL_DIR}
     source config_mrsi.sh
 
     case "${B0_MODE}" in
@@ -1534,6 +1544,7 @@ mrsi_do() {
         echo "check_for_file : $check_for_file"
         if [[ "$(echo -n "${check_for_file}")" == "false" ]]; then
             echo "$file_mrsi is missing some subjects. There will be no validation for this file"
+            [[ "$NONINTERACTIVE" == false ]] || { echo "Preparation stopped: required inputs are missing; inspect ${GLOBAL_DIR}/not_found.txt." >&2; exit 1; }
             read -p "Files are missing : Do you want to continue ? You might experienced some bugs. Check the file not_found.txt in your main directory to see which subjects bugged. Continue ? :" continue
             if [[ $continue == "y" || $continue == "yes" ]]; then
                 echo "ok !"
@@ -1557,6 +1568,7 @@ mrsi_do() {
         check_for_file=$(find_files_mrsi "${NII_DIR_MRSI}" mrsi "${file_mrsi}" "${MRSI_COMPRESSED}")
         if [[ "$(echo -n "${check_for_file}")" == "false" ]]; then
             echo "$file_mrsi is missing some subjects. There will be no validation for this file"
+            [[ "$NONINTERACTIVE" == false ]] || { echo "Preparation stopped: required inputs are missing; inspect ${GLOBAL_DIR}/not_found.txt." >&2; exit 1; }
             read -p "Files are missing : Do you want to continue ? You might experienced some bugs. Check the file not_found.txt in your main directory to see which subjects bugged. Continue ? :" continue
             if [[ $continue == "y" || $continue == "yes" ]]; then
                 echo "ok !"
@@ -1575,7 +1587,7 @@ mrsi_do() {
         fi
     done
 
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || return 1
     write_config_array config_mrsi.sh MRSI_FILES_VALIDATED "${MRSI_FILES_VALIDATED[@]}"
     write_config_array config_mrsi.sh MRSI_GLOBAL_FILES_VALIDATED "${MRSI_GLOBAL_FILES_VALIDATED[@]}"
 
@@ -1611,7 +1623,7 @@ mrsi_do() {
         process_mrsi_nii "${file_mrsi_val}"
     done
 
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || return 1
     write_config_array config_mrsi.sh METAB "${METAB_EXPORT[@]}"
     write_config_array config_mrsi.sh METABSUM "${METABSUM_EXPORT[@]}"
     write_config_array config_mrsi.sh METABQUOTIENTS "${METABQUOTIENTS_EXPORT[@]}"
@@ -1745,20 +1757,23 @@ find_files() {
 dti_do() {
 
     declare -A config_values
-    cd $GLOBAL_DIR
+    cd "$GLOBAL_DIR" || exit 1
 
-    # Check if config file exists and prompt in the terminal for overwriting
-    if [[ -f config_dti.sh ]]; then
-        read -p "config_dti.sh already exists. Do you want to overwrite it? (yes/no): " overwrite
-        if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
-            echo "Aborting."
-            exit 1
+    if [[ "$NONINTERACTIVE" == false ]]; then
+        # Check if config file exists and prompt in the terminal for overwriting
+        if [[ -f config_dti.sh ]]; then
+            read -p "config_dti.sh already exists. Do you want to overwrite it? (yes/no): " overwrite
+            if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
+                echo "Aborting."
+                exit 1
+            fi
         fi
+
+        collect_and_confirm_inputs_dti
+
+        cd "$GLOBAL_DIR" || exit 1
     fi
 
-    collect_and_confirm_inputs_dti
-
-    cd $GLOBAL_DIR
     source config_dti.sh
 
     local dtisuffix=${DTI_DATA_SUFFIX:-dwi}
@@ -1872,20 +1887,23 @@ collect_and_confirm_inputs_structural() {
 structural_do() {
 
     declare -A config_values
-    cd $GLOBAL_DIR
+    cd "$GLOBAL_DIR" || exit 1
 
-    # Check if config file exists and prompt in the terminal for overwriting
-    if [[ -f config_structural.sh ]]; then
-        read -p "config_structural.sh already exists. Do you want to overwrite it? (yes/no):  " overwrite
-        if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
-            echo "Aborting."
-            exit 1
+    if [[ "$NONINTERACTIVE" == false ]]; then
+        # Check if config file exists and prompt in the terminal for overwriting
+        if [[ -f config_structural.sh ]]; then
+            read -p "config_structural.sh already exists. Do you want to overwrite it? (yes/no):  " overwrite
+            if [[ "$overwrite" != "yes" && "$overwrite" != "y" ]]; then
+                echo "Aborting."
+                exit 1
+            fi
         fi
+
+        collect_and_confirm_inputs_structural
+
+        cd "$GLOBAL_DIR" || exit 1
     fi
 
-    collect_and_confirm_inputs_structural
-
-    cd $GLOBAL_DIR
     source config_structural.sh
 
     local structsuffix=${STRUCTURAL_DATA_SUFFIX:-T1w}
@@ -1911,7 +1929,7 @@ structural_do() {
         fi
     done
 
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || exit 1
     echo "STRUCTURAL_FILES_VALIDATED=(${STRUCTURAL_FILES_VALIDATED[@]})" >>config_structural.sh
 
 
@@ -1937,6 +1955,65 @@ structural_do() {
 ################### LAUNCHING SCRIPT ################################
 ##############################################################
 
+if [[ "$NONINTERACTIVE" == true ]]; then
+    set -e
+    [[ -f "$PREP_CONFIG" ]] || { echo "--non-interactive requires an existing --config file." >&2; exit 1; }
+    case "$PREP_MODALITY" in mrsi|dti|structural) ;; *) echo "Choose --modality MRSI, DTI or STRUCTURAL." >&2; exit 1 ;; esac
+    source "$PREP_CONFIG" || exit 1
+    for required in GLOBAL_DIR COHORT T1_MNI LIST_ALL_SUBJECTS; do
+        [[ -n "${!required}" ]] || { echo "Missing cohort setting: $required" >&2; exit 1; }
+        [[ "${!required}" != *[[:space:]]* ]] || { echo "Legacy preparation needs whitespace-free study/input paths: $required." >&2; exit 1; }
+    done
+    [[ -f "$T1_MNI" && -s "$LIST_ALL_SUBJECTS" ]] || { echo "Reference image or subject list is missing/empty." >&2; exit 1; }
+    cd "$GLOBAL_DIR" || exit 1
+    [[ -f "config_${PREP_MODALITY}.sh" ]] || { echo "Save the selected modality settings before preparing data." >&2; exit 1; }
+    source "config_${PREP_MODALITY}.sh" || exit 1
+    upper_modality=$(printf '%s' "$PREP_MODALITY" | tr '[:lower:]' '[:upper:]')
+    input_mode_setting="${upper_modality}_INPUT_MODE"
+    if [[ "${!input_mode_setting:-legacy}" == bids ]]; then
+        prep_args=(--config "$PREP_CONFIG" --modality "$upper_modality")
+        [[ "$OVERWRITE" != true ]] || prep_args+=(--overwrite)
+        [[ -z "$PREP_SUBJECTS" ]] || prep_args+=(--subjects "$PREP_SUBJECTS")
+        "${VLAD_PYTHON_BIN}" -m vlad.preparation "${prep_args[@]}" || exit $?
+        exit 0
+    fi
+    [[ -z "$PREP_SUBJECTS" ]] || { echo "--subjects is available only for BIDS derivative preparation." >&2; exit 1; }
+    input_setting="NII_DIR_${upper_modality}"
+    compression_setting="NII_DIR_${upper_modality}_compression"
+    [[ -d "${!input_setting}" && "${!input_setting}" != *[[:space:]]* ]] || { echo "Input directory is missing or contains whitespace: ${!input_setting}" >&2; exit 1; }
+    compressed=""
+    [[ "${!compression_setting}" != yes && "${!compression_setting}" != y ]] || compressed=".gz"
+    script_dir="$VLAD_HOME"
+    PYTHON_HELPERS="${VLAD_HOME}/src/vlad/legacy"
+    [[ -d "$PYTHON_HELPERS" ]] || PYTHON_HELPERS="${VLAD_HOME}/../legacy"
+    vlad_config="$VLAD_CONFIG_FILE"
+    mkdir -p Cartes4D Masques Results Scripts Listes
+    case "$PREP_MODALITY" in
+        mrsi)
+            MRSI_COMPRESSED="$compressed"
+            [[ ${#FILES_MRSI_MET[@]} -gt 0 ]] || FILES_MRSI_MET=(signal_filtbiharmonic_pvcorr crlb)
+            [[ ${#FILES_MRSI_GLOBAL[@]} -gt 0 ]] || FILES_MRSI_GLOBAL=(fwhm snr)
+            mrsi_do
+            [[ ${#MRSI_FILES_VALIDATED[@]} -gt 0 ]] || { echo "No MRSI files passed validation." >&2; exit 1; }
+            ;;
+        dti)
+            DTI_COMPRESSED="$compressed"
+            [[ ${#FILES_DTI[@]} -gt 0 ]] || FILES_DTI=(gFA)
+            dti_do
+            [[ ${#DTI_FILES_VALIDATED[@]} -eq ${#FILES_DTI[@]} ]] || { echo "Some DTI files did not pass validation." >&2; exit 1; }
+            ;;
+        structural)
+            STRUCTURAL_COMPRESSED="$compressed"
+            [[ ${#FILES_STRUCTURAL[@]} -gt 0 ]] || FILES_STRUCTURAL=(mwp1 mwp2 wp1 wp2)
+            structural_do
+            [[ ${#STRUCTURAL_FILES_VALIDATED[@]} -eq ${#FILES_STRUCTURAL[@]} ]] || { echo "Some structural files did not pass validation." >&2; exit 1; }
+            ;;
+    esac
+    [[ "$PREP_FAILED" == false ]] || { echo "One or more derived image operations failed." >&2; exit 1; }
+    echo "Cohort data preparation completed."
+    exit 0
+fi
+
 echo "================================="
 echo "Hi ! Let's create and organize the files you need ! :-)"
 echo "First, are you sure that your files are named correctly."
@@ -1953,10 +2030,12 @@ else
     echo "Let's proceed to the rest"
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="$VLAD_HOME"
+PYTHON_HELPERS="${VLAD_HOME}/src/vlad/legacy"
+[[ -d "$PYTHON_HELPERS" ]] || PYTHON_HELPERS="${VLAD_HOME}/../legacy"
 
 # Path to VLAD_configs.sh
-vlad_config="VLAD_configs.txt"
+vlad_config="$VLAD_CONFIG_FILE"
 active_global_config=""
 
 # Check if VLAD_configs.sh exists
@@ -1965,7 +2044,8 @@ if [[ -f "$vlad_config" ]]; then
 
     # Read the paths to config_global.sh files into an array
     config_files=()
-    while IFS= read -r line; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         config_files+=("$line")
     done <"$vlad_config"
 
@@ -2014,7 +2094,7 @@ if [[ -f "$vlad_config" ]]; then
             exit 1
         else
             active_global_config="${GLOBAL_DIR}/config_global.sh"
-            echo "$active_global_config" >>"${script_dir}/VLAD_configs.txt"
+            echo "$active_global_config" >>"$vlad_config"
         fi
     else
         echo "Invalid selection. Exiting."
@@ -2022,13 +2102,14 @@ if [[ -f "$vlad_config" ]]; then
     fi
 else
     echo "VLAD_configs.sh not found. Creating a new one..."
+    mkdir -p "$(dirname "$vlad_config")"
     touch "$vlad_config"
     if ! create_new_config; then
         echo "There has been a bug, exiting"
         exit 1
     else
         active_global_config="${GLOBAL_DIR}/config_global.sh"
-        echo "$active_global_config" >>"${script_dir}/VLAD_configs.txt"
+        echo "$active_global_config" >>"$vlad_config"
     fi
 fi
 

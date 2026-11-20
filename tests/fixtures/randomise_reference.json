@@ -1,0 +1,241 @@
+{
+  "provenance": {
+    "R": "R version 4.6.2 (2026-10-29)",
+    "statsExpressions": "2.2.1",
+    "effectsize": "1.0.3",
+    "gtsummary": "2.6.1",
+    "description": "Reference-only values from original R reporting dependencies; Python runtime never invokes R."
+  },
+  "groups": {
+    "values": [1, 2, 4, 5, 7, 8, 2, 3, 3, 4, 4, 6, 5, 7, 8, 8, 9, 11],
+    "labels": ["A", "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C", "C"],
+    "two": {
+      "parameter1": "value",
+      "parameter2": "group",
+      "mean.parameter1": 4.5,
+      "mean.parameter2": 3.6666666666666665,
+      "statistic": 0.66696316064026029,
+      "df.error": 7.3437064042707512,
+      "p.value": 0.5251913995623525,
+      "method": "Welch Two Sample t-test",
+      "alternative": "two.sided",
+      "effectsize": "Hedges' g",
+      "estimate": 0.34411915134633508,
+      "conf.level": 0.94999999999999996,
+      "conf.low": -0.69292613915186141,
+      "conf.high": 1.3588677342957203,
+      "conf.method": "ncp",
+      "conf.distribution": "t",
+      "n.obs": 12
+    },
+    "three": {
+      "statistic": 9.0544421489544114,
+      "df": 2,
+      "df.error": 9.2927062771109519,
+      "p.value": 0.0065753158882551838,
+      "method": "One-way analysis of means (not assuming equal variances)",
+      "effectsize": "Omega2",
+      "estimate": 0.56718247012817546,
+      "conf.level": 0.94999999999999996,
+      "conf.low": 0.094168098284792348,
+      "conf.high": 1,
+      "conf.method": "ncp",
+      "conf.distribution": "F",
+      "n.obs": 18
+    },
+    "pairwise": [
+      {
+        "group1": "A",
+        "group2": "B",
+        "statistic": -0.9432283473806814,
+        "p.value": 0.7888696863692618
+      },
+      {
+        "group1": "A",
+        "group2": "C",
+        "statistic": 3.5752774291867446,
+        "p.value": 0.14921490881720501
+      },
+      {
+        "group1": "B",
+        "group2": "C",
+        "statistic": 6.1975068300963514,
+        "p.value": 0.014108324902010194
+      }
+    ]
+  },
+  "correlation": {
+    "x": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    "y": [2, 1, 3, 5, 4, 8, 7, 9, 10, 12],
+    "estimate": 0.96624484211788553,
+    "statistic": 10.608239401635736,
+    "df": 8,
+    "p": 5.4530233235652235e-06,
+    "ci": [0.85953900965895136, 0.99222691414145359]
+  },
+  "demographics": {
+    "data": [
+      {
+        "group": "A",
+        "age": 1,
+        "binary": "yes",
+        "category": "A"
+      },
+      {
+        "group": "A",
+        "age": 2,
+        "binary": "yes",
+        "category": "A"
+      },
+      {
+        "group": "A",
+        "age": 3,
+        "binary": "yes",
+        "category": "A"
+      },
+      {
+        "group": "A",
+        "age": 4,
+        "binary": "no",
+        "category": "B"
+      },
+      {
+        "group": "A",
+        "age": 5,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 6,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 7,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 8,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 9,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 10,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 11,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "A",
+        "age": 12,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 13,
+        "binary": "yes",
+        "category": "A"
+      },
+      {
+        "group": "B",
+        "age": 14,
+        "binary": "no",
+        "category": "B"
+      },
+      {
+        "group": "B",
+        "age": 15,
+        "binary": "no",
+        "category": "B"
+      },
+      {
+        "group": "B",
+        "age": 16,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 17,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 18,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 19,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 20,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 21,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 22,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 23,
+        "binary": "no",
+        "category": "C"
+      },
+      {
+        "group": "B",
+        "age": 24,
+        "binary": "no",
+        "category": "C"
+      }
+    ],
+    "tests": [
+      {
+        "variable": "age",
+        "test_name": "wilcox.test",
+        "p.value": 7.39602301050679e-07
+      },
+      {
+        "variable": "binary",
+        "test_name": "fisher.test",
+        "p.value": 0.59006211180124213
+      },
+      {
+        "variable": "category",
+        "test_name": "fisher.test",
+        "p.value": 0.67636482510623952
+      }
+    ]
+  }
+}

@@ -1,371 +1,376 @@
 # VLAD
 
-VLAD is a bash-based workflow for voxel-based analyses of MRSI, DTI, and structural MRI data. It prepares cohort configuration, builds FSL-compatible design matrices from Excel files, runs Randomise or longitudinal SwE analyses, creates result snapshots, and renders HTML summaries from R Markdown.
+VLAD is a local neuroimaging workflow for voxelwise MRI, MRSI and diffusion
+analyses. It discovers BIDS-like derivatives, builds population masks and design
+matrices, runs FSL Randomise or longitudinal SwE, and produces self-contained
+Python HTML reports with statistical maps, cluster summaries and subject-level
+plots. R, RStudio and Pandoc are not required.
 
-This repository contains the current bash workflow and the Python/R helper files required by `VLAD_beta7.sh`.
+## 1. Installation
 
-## Included files
+### Full installation
 
-- `VLAD_beta7.sh`: main analysis script.
-- `Prep_VLAD_b6.1.sh`: interactive cohort/data preparation script.
-- `create_matrix_randoMRSI_beta7.py`: design and contrast matrix creation for standard Randomise analyses.
-- `create_matrix_VLADlov_swe_alpha2.py`: design, contrast, and subject file creation for FSL SwE longitudinal analyses.
-- `create_matrix_VLADlov_afni_alpha1.py`: optional AFNI `3dLME` helper.
-- `resample_masks_b3_replace.py`: mask resampling helper used during preparation.
-- `snapshot_results_randomise_beta5.py`: PNG snapshot generation for significant maps.
-- `Randomise_sum_up_v3.Rmd`: Randomise HTML summary.
-- `SWE_sum_up_v1.5.2.Rmd`: SwE HTML summary.
-- `Masks/`: standard HarvardOxford-derived masks that can be selected during cohort configuration.
-
-## External prerequisites
-
-Install these outside Python/R before running VLAD:
-
-- Bash 4 or newer. Both VLAD shell entrypoints verify this and automatically restart with a compatible Bash found in `PATH` or a standard Homebrew location.
-- FSL with `fslmaths`, `fslmerge`, `fslsplit`, `fslstats`, `fslval`, `flirt`, `Text2Vest`, and `randomise` or `randomise_parallel` in `PATH`.
-- FSL SwE command `swe` if using `--longitudinal swe`.
-- AFNI with `3dLME` in `PATH` if using `create_matrix_VLADlov_afni_alpha1.py`.
-- R, Rscript, and Pandoc for the HTML reports.
-- A Python 3 installation with Tk support, because the matrix helpers open an Excel file-selection dialog.
-- `zenity` for the interactive preparation script dialogs on Linux. macOS uses its native file and folder choosers instead.
-
-macOS ships `/bin/bash` 3.2, which is too old for VLAD. Install a current Bash once with `brew install bash`, then run the scripts directly with `./Prep_VLAD_b6.1.sh` or `./VLAD_beta7.sh`. Do not force `/bin/bash`; if automatic discovery is unsuitable, set `VLAD_BASH_BIN` to the compatible Bash executable you want VLAD to use.
-
-## Python setup
-
-From the repository root:
+Clone or unpack VLAD, enter its directory, and run one command:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+./install.sh
 ```
 
-When running the main script, either keep this environment activated or point VLAD to it:
+The installer:
+
+- creates a private, locked Python environment;
+- installs the browser command generator and Python reporting dependencies;
+- checks Bash, Tk, Zenity and the required system libraries;
+- reuses an existing FSL installation or installs FSL with Randomise and SwE;
+- preserves existing VLAD cohort configurations and working FSL installations;
+- does not modify shell profile files.
+
+On Debian/Ubuntu or macOS, missing system packages can be installed through
+`apt` or Homebrew. Administrator authentication may be requested. FSL is a
+large download, so a first full installation can take time.
+
+Verify the complete environment:
 
 ```bash
-export VLAD_PYTHON_BIN="$(pwd)/.venv/bin/python"
+./vlad doctor --profile full
 ```
 
-If you use `pyenv`, the main script also accepts:
+The installer is safe to rerun. To use an existing FSL installation explicitly:
 
 ```bash
-./VLAD_beta7.sh --python-env venv-mri ...
+./install.sh --fsl-dir /path/to/fsl
 ```
 
-`Prep_VLAD_b6.1.sh` uses the active `python3`, or the interpreter named by `VLAD_PYTHON_BIN`, for mask validation and resampling. It checks for `nibabel`, `nilearn`, and `numpy` before preparing masks and stops with a clear message if they are unavailable.
-
-## R setup
-
-From the repository root:
+For the browser, command generation and Python reports without FSL or desktop
+preparation tools:
 
 ```bash
-Rscript install_R_packages.R
+./install.sh --reports-only
+./vlad doctor --profile reports
 ```
 
-The R package list is stored in `requirements.R`. Some packages, especially `arrow`, can require system libraries depending on the operating system.
+Native installation supports Linux and macOS. On Windows, use a supported Linux
+or WSL environment. A container setup is documented in
+[docker/README.md](docker/README.md).
 
-## First-time VLAD setup
+## 2. Generate and run a VLAD command
 
-Run all setup commands from the repository root. The setup script stores paths relative to where it is installed, so avoid launching it from another working directory.
-
-Make the scripts executable if the clone did not preserve file modes:
+### Start the command generator
 
 ```bash
-chmod +x VLAD_beta7.sh Prep_VLAD_b6.1.sh
+./vlad gui
 ```
 
-Launch the scripts directly as shown below. Their interpreter bootstrap checks for Bash 4 or newer and preserves all command-line arguments if it needs to restart under a newer Bash.
-
-Activate the Python environment before preparation (or export `VLAD_PYTHON_BIN` as shown above):
-
-```bash
-source .venv/bin/activate
-./Prep_VLAD_b6.1.sh
-```
-
-For 7T MRSI preparation, pass the B0 mode during preparation:
-
-```bash
-./Prep_VLAD_b6.1.sh --b0 7
-```
-
-The setup script is `Prep_VLAD_b6.1.sh`. If you see older notes mentioning `VLAD_b6.1.sh` or `setup_VLAD.sh`, they refer to this preparation step.
-
-## Cohort Setup
-
-A cohort is one configured study/data root. Each cohort has its own `GLOBAL_DIR`, subject list, modality configuration, masks, results, and generated files.
-
-When `Prep_VLAD_b6.1.sh` starts, it reads `VLAD_configs.txt` from the VLAD repository. If the file already contains cohort configs, it lists them by `COHORT` name and lets you choose one or create another. If it does not exist, it creates one.
-
-For a new cohort, the script asks for:
-
-- `GLOBAL_DIR`: the main directory for this cohort. VLAD creates `Cartes4D/`, `Masques/`, `Results/`, `Scripts/`, and `Listes/` inside it.
-- `COHORT`: the short cohort name used later with `./VLAD_beta7.sh -c COHORT`.
-- `T1_MNI`: anatomical reference image used for snapshots and mask alignment.
-- `DIR_RANALYSES`: where rendered R summary reports should be copied.
-- `LIST_ALL_SUBJECTS`: a text file containing all available subjects and visits.
-
-The subject list must contain one subject/visit per line, using the format:
+VLAD opens the local Streamlit interface at:
 
 ```text
-SUBJECT_VISIT
+http://127.0.0.1:2342
 ```
 
-For example:
+All selected paths refer to the computer running VLAD. Browse dialogs choose
+local files and directories; they do not upload imaging data. Global settings
+can store the main BIDS directory, the Light/Dark theme and the local GUI state
+directory.
 
-```text
-001_V1
-001_V2
-002_V1
-```
-
-VLAD expects a single underscore separator: the text before the underscore becomes `sub-`, and the text after it becomes `ses-`. The examples above are expected to match files such as `sub-001_ses-V1_...`.
-
-After global setup, choose the modality to configure. For MRSI, type:
-
-```text
-mrsi
-```
-
-The MRSI setup asks for:
-
-- `NII_DIR_MRSI`: directory containing the MRSI NIfTI files. VLAD searches recursively inside this directory.
-- Compression: whether files end in `.nii.gz` or `.nii`.
-- `MRSI_SPACE_LABEL`: the value after `space-`, default `mni`.
-- `MRSI_EXTRA_TAGS`: optional BIDS-like tags inserted after the space label, for example `res-3.0mm`.
-- `MRSI_MASK_LIST`: masks to prepare for MRSI. These are copied/resampled under the cohort `Masques/` tree.
-- Metabolite names. Defaults are `CrPCr NAA NAAG GPCPCh Ins Glu Gln GABA GSH`.
-- Per-metabolite file descriptions. Defaults are `signal_filtbiharmonic_pvcorr` and `crlb`.
-- Global MRSI file descriptions. Defaults are `fwhm` and `snr`.
-
-## Standard Masks
-
-The repository includes standard masks in `Masks/`. During cohort configuration, when `Prep_VLAD_b6.1.sh` asks for `MRSI_MASK_LIST`, you can select one or more of these files. The preparation script copies them into the cohort mask directory, or resamples them to the cohort reference image when needed:
-
-```text
-GLOBAL_DIR/Masques/<COHORT>/mrsi/
-```
-
-Keep the filenames unchanged, because `VLAD_beta7.sh` searches for masks by these names when using `--mask`.
-
-If you want every `--mask` preset to be available later, select all six standard masks during MRSI cohort configuration.
-
-Included masks:
-
-- `HarvardOxford-white-grey-matter.nii.gz`: default whole white plus grey matter mask.
-- `HarvardOxford-white-matter.nii.gz`: white matter mask.
-- `HarvardOxford-grey-matter.nii.gz`: grey matter mask.
-- `HarvardOxford-cortex.nii.gz`: cortical grey matter mask.
-- `HarvardOxford-subcortical-nuclei.nii.gz`: subcortical nuclei mask.
-- `HarvardOxford-white-grey-matter-cerebellum.nii.gz`: white plus grey matter plus cerebellum mask.
-
-Mask presets in `VLAD_beta7.sh` use these files:
-
-- default: `HarvardOxford-white-grey-matter.nii.gz`
-- `--mask wmgm`: white-grey-matter, white-matter, grey-matter
-- `--mask wmgmbg`: white-grey-matter, white-matter, cortex, subcortical-nuclei
-- `--mask onlygrey`: grey-matter
-- `--mask onlywhite`: white-matter
-- `--mask onlygreydetail`: grey-matter, cortex, subcortical-nuclei
-- `--mask cerebellum`: white-grey-matter-cerebellum
-
-The mask input accepts a single `.nii`/`.nii.gz` image, multiple files selected in the chooser, or a text manifest ending in `.txt` or `.list`. Manifest lines may contain mask paths or filenames; blank lines and lines beginning with `#` are ignored. A NIfTI image is never read as a text manifest.
-
-### DTI analysis mask
-
-DTI uses one primary analysis mask per cohort. During DTI preparation, select a single mask; its original filename can be arbitrary, for example `FA_2500.nii.gz`, `white_matter_mask.nii.gz`, or `study_FA_threshold.nii.gz`. Preparation copies or nearest-neighbour resamples it into:
-
-```text
-GLOBAL_DIR/Masques/<COHORT>/dti/
-```
-
-After successful preparation, `config_dti.sh` records the basename as `DTI_ANALYSIS_MASK_FILENAME`. `VLAD_beta7.sh` uses that value for both Randomise and SwE. For older cohorts without this setting, VLAD first supports the legacy `FA_2500.nii.gz` name, then accepts the only NIfTI file in the cohort DTI mask directory. If none or several are present, it stops and asks for an unambiguous primary mask.
-
-The tissue presets selected with `--mask` apply to MRSI and structural analyses, not DTI. Supplying `--mask` with `-t DTI` is rejected because the configured primary DTI mask is always used.
-
-Expected MRSI filenames are:
-
-```text
-sub-SUBJECT_ses-VISIT_space-SPACE_met-METAB_desc-DESCRIPTION_mrsi.nii.gz
-sub-SUBJECT_ses-VISIT_space-SPACE_desc-snr_mrsi.nii.gz
-sub-SUBJECT_ses-VISIT_space-SPACE_desc-fwhm_mrsi.nii.gz
-```
-
-Example:
-
-```text
-sub-001_ses-V1_space-mni_met-NAANAAG_desc-signal_filtbiharmonic_pvcorr_mrsi.nii.gz
-sub-001_ses-V1_space-mni_met-NAANAAG_desc-crlb_mrsi.nii.gz
-sub-001_ses-V1_space-mni_desc-snr_mrsi.nii.gz
-sub-001_ses-V1_space-mni_desc-fwhm_mrsi.nii.gz
-```
-
-DTI and structural setup use one `*_BIDS_INFIX` value for the BIDS tags between `sub-SUBJECT_ses-VISIT` and `desc-DESCRIPTION`. Enter it without leading or trailing underscores; the script also accepts and normalizes them.
-
-Expected DTI and structural filenames are:
-
-```text
-sub-SUBJECT_ses-VISIT_<BIDS_INFIX>_desc-DESCRIPTION_<SUFFIX>.nii.gz
-```
-
-Defaults:
-
-```text
-DTI_BIDS_INFIX=space-mni_acq-dti
-DTI_DATA_SUFFIX=dwi
-STRUCTURAL_BIDS_INFIX=space-mni_acq-memprage
-STRUCTURAL_DATA_SUFFIX=T1w
-```
-
-Examples:
-
-```text
-sub-001_ses-V1_space-mni_acq-dti_desc-gFA_dwi.nii.gz
-sub-001_ses-V1_space-mni_acq-memprage_desc-mwp1_T1w.nii.gz
-```
-
-During MRSI preparation, VLAD validates the expected files, creates derived sum/ratio/quotient maps, and creates subject-level quality masks using SNR, FWHM, and CRLB. Missing files are reported in `GLOBAL_DIR/not_found.txt`.
-
-The preparation script creates:
-
-- `GLOBAL_DIR/config_global.sh`
-- `GLOBAL_DIR/config_mrsi.sh`
-- an entry in local `VLAD_configs.txt` pointing to `GLOBAL_DIR/config_global.sh`
-
-`VLAD_configs.txt` is intentionally ignored by git because it contains computer-specific absolute paths. `VLAD_configs.example.txt` shows the expected format.
-
-## Cohort Selection
-
-The main script selects a cohort from `VLAD_configs.txt`.
-
-Use `-c` when you know the cohort name:
+For a remote server, suppress automatic browser opening:
 
 ```bash
-./VLAD_beta7.sh -c ARMS -t MRSI -n AllSubjects -m PatientsVsControls
+./vlad gui --headless
 ```
 
-If `-c` is omitted, VLAD lists all configured cohorts and asks you to select one interactively. The `-c` value must match the `COHORT` value stored in the selected cohort's `config_global.sh`.
+Use `--host` and `--port` when a different listen address or port is required.
 
-## Analysis Name and Matrix Name
+### Guided MRSI workflow
 
-`-n` and `-m` are not interchangeable.
+The command generator has six steps:
 
-`-n` or `--name` is the analysis/population name. It identifies the selected population and controls these generated paths:
+1. **Data** — load a covariate TSV containing `participant_id` and `session_id`,
+   choose the MRSI derivative folder, and match `space-`, `met-`, optional
+   `desc-`, and optional `res-` filename entities. Rows can be filtered or
+   explicitly excluded. Metabolite entries may include voxelwise ratios such as
+   `Glu/GABA` and `Glu/SUMOFMETABOLITES`. Optional gauge correction is configured
+   here.
+2. **Population mask** — use one precomputed binary mask per metabolite/ratio or
+   build population masks from matching quality maps. The defaults are CRLB
+   `<20`, FWHM `<0.1` and SNR `>10`, with 68% population coverage.
+3. **Model** — retain the covariate table layout and select `Include`, `Confound`
+   or `Regressor` with checkboxes. A covariate cannot be both a confound and a
+   regressor: selecting either role clears the other. Exactly one tested
+   regressor is required.
+4. **Contrasts** — review the exact design-column order. Both suggested
+   directions are selected by default; keep either one or both, enter custom
+   weights, or load a contrast file.
+5. **Randomise settings** — choose permutations, TFCE, variance smoothing,
+   corrected outputs, seed, exchangeability blocks and the number of metabolites
+   processed concurrently.
+6. **Command** — choose the study output folder and run name, then click
+   **Generate command**. VLAD validates the complete design, creates the study
+   `plans/` and `runs/` parent directories, saves an immutable JSON plan, and
+   displays the command to execute. It also recaps included covariates, model
+   roles, total sample size and categorical/binary regressor group counts.
+
+The Command page does not execute the analysis, monitor jobs or display results.
+Copy the generated command and run it in a terminal. It has this form:
+
+```bash
+/path/to/VLAD/.venv/bin/python -m vlad workflow --plan /study/plans/MyRun-<hash>.json
+```
+
+The workflow creates `/study/runs/MyRun/` only when that command executes. It
+refuses to overwrite an existing run folder.
+
+### Generated outputs
+
+A completed guided run contains:
 
 ```text
-GLOBAL_DIR/Listes/List_<NAME>.txt
-GLOBAL_DIR/Cartes4D/<NAME>/
-GLOBAL_DIR/Results/<NAME>/
+runs/<run-name>/
+├── plan.json
+├── design.mat
+├── design.con
+├── design.tsv
+├── covariates.tsv
+├── selection.tsv
+├── subjects.txt
+├── results.tsv
+├── results.json
+├── report.html
+├── report_assets/
+└── <metabolite-or-ratio>/
+    ├── signals.nii.gz
+    ├── population_mask.nii.gz
+    ├── coverage.nii.gz
+    ├── individual_masks/
+    └── randomise_*.nii.gz
 ```
 
-Use a stable name for the group of subjects included in the analysis, for example:
+When gauge correction is enabled, raw stacks, the shared `gauge_term.nii.gz`,
+per-map group means, z maps and audit metadata are also retained. The HTML report
+contains anatomical slice mosaics, connected-cluster tables and descriptive
+subject-level plots for significant corrected maps.
+
+To prepare matrices, 4D stacks and masks without running Randomise:
 
 ```bash
--n AllSubjects
--n PatientsVsControls
--n BaselineOnly
+./vlad workflow --plan /study/plans/MyRun-<hash>.json --prepare-only
 ```
 
-If `List_<NAME>.txt` does not exist, VLAD can create it while building the matrix. The matrix helper opens an Excel file, asks for the sheet and columns to include, drops rows with missing values, and writes the selected subject list. It defaults to an Excel subject column named `Nom_dossier`; if that column is absent, it asks for the subject column name. The subject values must use the same `SUBJECT_VISIT` format as the global subject list.
+To regenerate the HTML report for an existing completed run without repeating
+permutations:
 
-`-m` or `--matrix` is the design/contrast name. It controls files under `GLOBAL_DIR/Results/<NAME>/`, such as:
+```bash
+./vlad workflow --plan /study/runs/MyRun/plan.json --report-only
+```
+
+The full browser workflow, matching rules, mask construction and report layout
+are described in [docs/browser-gui.md](docs/browser-gui.md).
+
+## 3. Other workflows
+
+The **Existing studies** interface retains cohort configuration, TemplateFlow
+reference selection, BIDS preparation, DWI/structural workflows, SwE and reports.
+Equivalent terminal commands remain available through `vlad configure`,
+`vlad prep`, `vlad run` and `vlad report`.
+
+Example Python report regeneration:
+
+```bash
+./vlad report --kind randomise \
+  --results-dir /study/Results/PatientsVsControls \
+  --analysis-name PatientsVsControls \
+  --matrix-name GroupAgeSex \
+  --permutations 500 \
+  --modality mrsi \
+  --export-dir /study/reports
+```
+
+Historical matrix and snapshot helpers remain available as compatibility
+commands. They may open desktop file/Excel dialogs and are not used by the new
+guided command generator.
+
+## 4. Repository layout and documentation
 
 ```text
-<MATRIX>.mat
-<MATRIX>.con
-<MATRIX>.csv
-main_variable_<MATRIX>.txt
+src/vlad/          Python CLI, guided workflow, reporting and scientific helpers
+workflows/         Bash cohort preparation and established analysis workflow
+config/            Example cohort registry and configuration
+scripts/           Installation, verification and compatibility wrappers
+requirements/      Generated dependency exports
+tests/             Unit, integration and statistical reference checks
+docker/            Container environment and guide
+docs/              Browser, workflow, development and migration documentation
 ```
 
-Use a name that describes the statistical model, for example:
+Only `install.sh` and `vlad` are primary executable entry points in the project
+root. Private configurations, environments, caches and analysis outputs are
+ignored. No cohort data is included.
+
+- [Browser command generator](docs/browser-gui.md)
+- [Cohort and analysis workflow](docs/workflow.md)
+- [Installation and development](docs/development.md)
+- [Python reporting migration](docs/python-reporting-migration.md)
+
+Run the repository verification suite with:
 
 ```bash
--m Group
--m GroupAgeSex
--m SymptomsAgeSex
+./scripts/check.sh
 ```
 
-Avoid spaces and underscores in both names. VLAD warns about underscores because they can break parts of the R summary. Prefer letters, numbers, and dashes.
+## 5. Complete CLI argument reference
 
-## Running an Analysis
+Arguments shown in brackets are optional. Run `./vlad <command> --help` for the
+installed command's authoritative help. JSON arguments must be valid JSON in one
+shell argument, normally enclosed in single quotes.
 
-General form:
+### Commands
 
-```bash
-./VLAD_beta7.sh -c COHORT -t MRSI -n ANALYSIS_NAME -m MATRIX_NAME -p 500
-```
+| Command | Purpose |
+|---|---|
+| `./vlad gui` | Open the browser command generator and established study interface. |
+| `./vlad workflow` | Execute or prepare an immutable guided-workflow plan, or regenerate its report. |
+| `./vlad doctor` | Check installed dependencies for a selected capability profile. |
+| `./vlad configure` | Save an established-study configuration noninteractively. |
+| `./vlad prep` | Prepare established cohort images interactively or from a saved configuration. |
+| `./vlad run` | Run the established Bash analysis workflow. |
+| `./vlad report` | Generate Randomise or SwE reports in Python. |
+| `./vlad matrix-randomise` | Open the legacy Randomise matrix builder. |
+| `./vlad matrix-swe` | Open the legacy SwE matrix builder. |
+| `./vlad matrix-afni` | Open the legacy AFNI input builder. |
+| `./vlad resample-masks` | Resample masks to a reference grid. |
+| `./vlad snapshot` | Create a compatibility statistical-map snapshot. |
 
-Example MRSI group comparison using absolute metabolites, ratios to sum, quotients, and detailed tissue masks:
+### Installer arguments
 
-```bash
-./VLAD_beta7.sh \
-  -c ARMS \
-  -t MRSI \
-  -n PatientsVsControls \
-  -m GroupAgeSex \
-  -p 500 \
-  --metabs NAANAAG CrPCr Ins GPCPCh GluGln \
-  --sum \
-  -q '*onCrPCr' \
-  --mask wmgmbg
-```
+| Argument | Value/default | Description |
+|---|---|---|
+| `-h`, `--help` | — | Show installer help. |
+| `--reports-only` | Off | Install the browser and Python reports without FSL or desktop tools. |
+| `--python PATH` | Auto-detected/private Python | Select Python 3.10–3.12; Tk is required for a full installation. |
+| `--fsl-dir PATH` | Existing `FSLDIR` or `.local/fsl` | Reuse FSL at this path, or install into a new path. |
+| `--skip-system` | Off | Do not install missing system packages. |
+| `--skip-fsl` | Off | Do not download FSL; a full installation still validates it. |
+| `--no-check` | Off | Skip final dependency checks, leaving the installation unverified. |
+| `--yes` | Off | Use noninteractive package-manager/bootstrap operation. |
 
-Preparation only:
+### Global, GUI, doctor and guided-workflow arguments
 
-```bash
-./VLAD_beta7.sh -c ARMS -t MRSI -n PatientsVsControls -m GroupAgeSex --sum --prepare
-```
+| Command | Argument | Value/default | Description |
+|---|---|---|---|
+| `vlad` | `-h`, `--help` | — | Show top-level help. |
+| `vlad` | `--version` | — | Print the installed VLAD version. |
+| `vlad gui` | `-h`, `--help` | — | Show GUI help. |
+| `vlad gui` | `--host HOST` | `127.0.0.1` | Streamlit listen address. |
+| `vlad gui` | `--port PORT` | `2342` | Streamlit port, from 1 to 65535. |
+| `vlad gui` | `--headless`, `--no-browser` | Off | Start without opening a browser. |
+| `vlad doctor` | `-h`, `--help` | — | Show dependency-check help. |
+| `vlad doctor` | `--profile PROFILE` | `python` | One of `python`, `analysis`, `prep`, `reports`, or `full`. |
+| `vlad workflow` | `-h`, `--help` | — | Show guided-workflow help. |
+| `vlad workflow` | `--plan PATH` | Required | Immutable JSON plan generated by VLAD. |
+| `vlad workflow` | `--prepare-only` | Off | Create designs, stacks and masks without Randomise. |
+| `vlad workflow` | `--report-only` | Off | Regenerate the report for the plan's existing completed run; incompatible with `--prepare-only`. |
 
-Analyze existing Randomise/SwE results and render the R summary only:
+### `vlad configure` arguments
 
-```bash
-./VLAD_beta7.sh -c ARMS -t MRSI -n PatientsVsControls -m GroupAgeSex --analyze
-```
+| Argument | Value/default | Description |
+|---|---|---|
+| `-h`, `--help` | — | Show configuration help. |
+| `--registry PATH` | Required | Cohort registry text file. |
+| `--name NAME` | Required | Saved cohort name. |
+| `--global-dir PATH` | Required | Study working/output directory. |
+| `--reference-image PATH` | Required | Reference anatomical NIfTI. |
+| `--subjects-file PATH` | Required | Subject/visit list. |
+| `--input-dir PATH` | Required | Imaging derivative input directory. |
+| `--exports-dir PATH` | None | Report export directory. |
+| `--population-mask PATH` | None | Optional precomputed population mask. |
+| `--modality VALUE` | `MRSI` | Study modality. |
+| `--space LABEL` | `mni` | Input/reference space label. |
+| `--extra-tags TEXT` | Empty | Additional filename matching tags. |
+| `--input-mode VALUE` | `bids` | Input matching mode. |
+| `--resolution LABEL` | Empty | Optional resolution entity. |
+| `--signal-description LABEL` | `signal` | Signal-map `desc-` label. |
+| `--qmask-mode VALUE` | `thresholds` | Quality-mask mode. |
+| `--crlb-max NUMBER` | `20` | Maximum accepted CRLB value. |
+| `--fwhm-max NUMBER` | `0.1` | Maximum accepted FWHM value. |
+| `--snr-min NUMBER` | `10` | Minimum accepted SNR value. |
+| `--metabolites JSON` | None | JSON list of metabolite labels. |
+| `--masks JSON` | None | JSON list of mask paths/names. |
+| `--dwi-files JSON` | None | JSON list of DWI derivative patterns/files. |
+| `--overwrite` | Off | Allow replacement where supported by cohort saving. |
+| `--mask-space-confirmed` | Off | Record that the supplied mask/reference space was confirmed. |
+| `--uncompressed` | Off | Store uncompressed NIfTI outputs instead of compressed outputs. |
+| `--reference-metadata JSON` | None | JSON object describing the reference source/template. |
 
-Prepare now and queue the analysis for later:
+### `vlad prep` arguments
 
-```bash
-./VLAD_beta7.sh -c ARMS -t MRSI -n PatientsVsControls -m GroupAgeSex --sum --prepare --batch queue
-./VLAD_beta7.sh --batch run
-```
+| Argument | Value/default | Description |
+|---|---|---|
+| `-h`, `--help` | — | Show preparation help. |
+| `--b0 VALUE` | `3` | MRSI field-strength preset: `3` or `7`. |
+| `--overwrite` | Off | Recompute outputs that already exist. |
+| `--config PATH` | None | Saved cohort configuration; required for noninteractive BIDS preparation. |
+| `--modality VALUE` | None | `MRSI`, `DTI`, or `STRUCTURAL`; required with `--config`. |
+| `--subjects PATH` | Whole cohort | Explicit selected subject/visit list; requires noninteractive configured BIDS preparation. |
+| `--non-interactive` | Off | Use the supplied configuration without desktop dialogs. |
 
-## Important MRSI Options
+### `vlad run` arguments
 
-- `-t MRSI`: selects the MRSI branch. The value is case-insensitive.
-- `--b0 3`: default 3T-style analysis using `SumMetabs` and `RatioSum`.
-- `--b0 7`: 7T-style analysis using 9-metabolite sums where available, with `SumMetabs9` and `RatioSum9`.
-- `--b0 7as3`: analyze 7T data with the 3T-style 5-metabolite set, using `SumMetabs5` and `RatioSum5`.
-- `--metabs MET1 MET2`: analyze only selected absolute metabolites.
-- `--metabs none`: skip absolute metabolite analyses.
-- `-s` or `--sum`: include sum and ratio-to-sum analyses. Without values, VLAD uses all configured sum outputs. With values, it restricts to selected sum/ratio outputs.
-- `-q` or `--quotients`: include metabolite quotient analyses. You can list exact quotients or shell globs. Quote globs in zsh, for example `-q '*onCrPCr'`.
-- `--mask wmgm`: analyze `white-grey-matter`, `white-matter`, and `grey-matter`.
-- `--mask wmgmbg`: analyze `white-grey-matter`, `white-matter`, `cortex`, and `subcortical-nuclei`.
-- `--mask onlygrey`, `--mask onlywhite`, `--mask onlygreydetail`, or `--mask cerebellum`: narrower mask presets.
-- `--qualithresh 50`: require at least 50 percent of subjects to have valid quality mask coverage in a voxel. Default is `68`.
-- `--cards`: force recreation of 4D cards. Optionally pass a card suffix after it.
-- `--smooth [sigma]`: create smoothed 4D cards, including MRSI cards. Smoothing is applied before the analysis quality/tissue mask; default sigma is `1`.
-- `--logarithm`: apply log transform before Randomise or SwE.
-- `-p 500`: number of permutations. Default is `300`.
-- `--noparallel`: use `randomise` instead of `randomise_parallel`.
-- `--longitudinal swe`: use the FSL SwE workflow and the SwE R summary.
-- `--confirmation little`: rerun with higher permutations and warnings disabled.
-- `--confirmation masked`: confirmation mode using subject-level quality masks.
-- `-cm` or `--confirmation_M`: prepare masked confirmation design files.
-- `--remakeall`: delete the current `Cartes4D/<NAME>`, `Results/<NAME>`, and `Listes/List_<NAME>.txt` outputs before rebuilding.
+| Argument | Value/default | Description |
+|---|---|---|
+| `-h`, `--help` | — | Show established-analysis help. |
+| `-c`, `--cohort NAME` | Interactive selection | Registered cohort name. |
+| `-t`, `--type TYPE` | Required for a new analysis | `MRSI`, `DTI`, or `Structural`. |
+| `-n`, `--name NAME` | Required | Analysis/population name. |
+| `-m`, `--matrix NAME` | Required in noninteractive mode | Design matrix name. |
+| `-a`, `--anova` | Off | Request the legacy ANOVA path. |
+| `--b0 VALUE` | `3` | MRSI preset: `3`, `7`, or `7as3`. |
+| `--metabs LABEL...` | Configured metabolites | Restrict absolute metabolites; `none` disables absolute maps. |
+| `-s`, `--sum [LABEL...]` | Off | Enable sum/ratio-to-sum maps, optionally restricted to labels. |
+| `-q`, `--quotients [LABEL...]` | Off | Enable quotient maps, optionally restricted to labels or quoted globs. |
+| `-d`, `--description LABEL...` | All validated maps | Restrict Structural/DTI filename descriptions. |
+| `-p`, `--perm NUMBER` | `300` | Number of permutations. |
+| `--cards [SUFFIX]` | Auto | Force 4D stack creation, optionally with a card suffix. |
+| `--mask VALUE` | Configured/default masks | `wmgm`, `wmgmbg`, `onlygrey`, `onlywhite`, `onlygreydetail`, `cerebellum`, or `population`. |
+| `--qualithresh PERCENT` | `68` | Population quality coverage; current legacy maximum is 99. |
+| `--smooth [SIGMA]` | Off; sigma `1` when omitted | Smooth 4D cards. |
+| `--logarithm` | Off | Log-transform data before inference. |
+| `-l`, `--longitudinal TOOL` | Off | Longitudinal engine: `swe` or legacy `afni`. |
+| `--noparallel` | Off | Use `randomise` instead of `randomise_parallel`. |
+| `--confirmation MODE` | Off | `little` or `masked`; uses 10,000 permutations and confirmation behavior. |
+| `-cm`, `--confirmation_M` | Off | Build confirmation inputs masked by subject quality masks. |
+| `--difflipid` | Off | Use the legacy alternative lipid-suppression map directory. |
+| `--remakeall` | Off | Delete and rebuild matching analysis, 4D and list outputs; destructive and unavailable noninteractively. |
+| `--prepare` | Off | Run only subject-list, matrix and 4D preparation. |
+| `--analyze` | Off | Run only result checking/extraction and Python report generation. |
+| `--non-interactive` | Off | Never open dialogs or wait for terminal input; requires cohort, name and matrix. |
+| `--batch MODE` | Off | `queue`/`add`, `run`, or internal `worker`. Queue/add is used with `--prepare`. |
+| `--batch-file PATH` | Environment/default queue file | Select the batch command file. |
+| `--python-env NAME` | Installed interpreter | Use a named pyenv environment for VLAD Python helpers. |
 
-Because `-m` means matrix, use the long option `--mask` for tissue masks.
+### `vlad report` arguments
 
-These `--mask` presets are for MRSI and structural analyses. DTI uses its configured primary analysis mask instead.
+| Argument | Value/default | Description |
+|---|---|---|
+| `-h`, `--help` | — | Show report help. |
+| `--kind VALUE` | Required | `randomise` or `swe`. |
+| `--results-dir PATH` | Current directory | Directory containing extracted analysis results. |
+| `--analysis-name NAME` | Required | Analysis/population name. |
+| `--matrix-name NAME` | Required | Matrix/model name. |
+| `--permutations NUMBER` | `500` | Permutation count recorded in the report. |
+| `--export-dir PATH` | Results-dependent default | Export directory for merged tables and figures. |
+| `--modality VALUE` | `mrsi` | Modality label. |
+| `--output PATH` | Generated report name | Explicit HTML output path. |
+| `--confirmation` | Off | Mark/report a confirmation analysis. |
+| `--date YYYY-MM-DD` | Current date | Fixed date for reproducible exports. |
+| `--subject-column NAME` | Auto-detected | Explicit subject identifier column. |
+| `--visit-column NAME` | Auto-detected | Explicit visit/session column. |
+| `--design-columns NAME...` | Exported design order | Exact FSL design/contrast column names. |
 
-For help:
+### Compatibility helper arguments
 
-```bash
-./VLAD_beta7.sh --help
-```
-
-## Files intentionally not committed
-
-The repository ignores local cohort configuration, queued batch commands, analysis outputs, old experiments, publication figures, editor settings, and the separate `VLAD_py/` Python application repository. Those files are either machine-specific, generated, or part of a separate project.
+| Command | Arguments | Description |
+|---|---|---|
+| `vlad matrix-randomise` | `ANALYSIS_NAME MATRIX_NAME MAIN_DIRECTORY CREATE_LIST ANOVA` | Legacy Randomise matrix builder; `CREATE_LIST` and `ANOVA` are `0`/`1`. Opens an Excel/sheet dialog. |
+| `vlad matrix-swe` | `ANALYSIS_NAME MATRIX_NAME MAIN_DIRECTORY MAKE_LIST` | Legacy SwE matrix builder; `MAKE_LIST` is `0`/`1`. Opens an Excel/sheet dialog. |
+| `vlad matrix-afni` | `PREFIX MASK IMG_DIR IMG_SUFFIX` | Legacy AFNI input builder. Opens an Excel/sheet dialog. |
+| `vlad snapshot` | `STAT_MAP OUTPUT_NAME COLORMAP ANATOMICAL_IMAGE` | Create a snapshot; `COLORMAP` is `1` for red or `2` for blue. |
+| `vlad resample-masks` | `[-h] --masks PATH... --t1 PATH [--backup-dirname NAME] [--replace] [--interp nearest\|continuous]` | Resample 3D/4D masks to the first 3D volume of the reference; default interpolation is `nearest`, default backup directory is `original`. |

@@ -1,0 +1,76 @@
+"""Configured preparation must work without terminal responses or native dialogs."""
+
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class HeadlessPreparationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="vlad-prep-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.study = self.root / "study"
+        self.study.mkdir()
+        self.inputs = self.root / "images"
+        self.inputs.mkdir()
+        self.reference = self.root / "reference.nii.gz"
+        self.reference.write_bytes(b"synthetic test file")
+        self.subjects = self.root / "subjects.txt"
+        self.subjects.write_text("001_V1\n")
+        self.config = self.study / "config_global.sh"
+        values = {"GLOBAL_DIR": str(self.study), "COHORT": "Smoke", "T1_MNI": str(self.reference), "LIST_ALL_SUBJECTS": str(self.subjects)}
+        self.config.write_text("".join(f"{name}={shlex.quote(value)}\n" for name, value in values.items()))
+        (self.study / "config_dti.sh").write_text(f"NII_DIR_DTI={shlex.quote(str(self.inputs))}\nNII_DIR_DTI_compression=yes\nFILES_DTI=(gFA)\n")
+        fsl = self.root / "fsl"
+        (fsl / "etc/fslconf").mkdir(parents=True)
+        (fsl / "etc/fslconf/fsl.sh").write_text("# Isolated test tools.\n")
+        tools = fsl / "share/fsl/bin"
+        tools.mkdir(parents=True)
+        stats = tools / "fslstats"
+        stats.write_text('#!/bin/sh\ncase "$*" in *-R*) echo "1 1" ;; *) echo "1" ;; esac\n')
+        stats.chmod(0o755)
+        marker = tools / "zenity"
+        self.marker = self.root / "native-dialog-called"
+        marker.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(self.marker))}\nexit 99\n")
+        marker.chmod(0o755)
+        self.env = os.environ.copy()
+        self.env.update(FSLDIR=str(fsl), VLAD_HOME=str(ROOT), VLAD_CONFIG_FILE=str(self.root / "registry.txt"), VLAD_PYTHON_BIN=sys.executable)
+        self.env.pop("VLAD_FSL_INITIALIZED_FOR", None)
+
+    def run_prep(self, *args):
+        result = subprocess.run(["bash", str(ROOT / "workflows/Prep_VLAD_b6.1.sh"), *args],
+                                cwd=self.root, env=self.env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=10)
+        self.assertFalse(self.marker.exists(), "Headless preparation opened a native dialog")
+        return result
+
+    def test_explicit_config_and_modality_are_required(self):
+        result = self.run_prep("--non-interactive")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--config", result.stderr)
+        result = self.run_prep("--non-interactive", "--config", str(self.config))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--modality", result.stderr)
+
+    def test_existing_dti_configuration_prepares_without_any_dialog(self):
+        (self.inputs / "sub-001_ses-V1_space-mni_acq-dti_desc-gFA_dwi.nii.gz").write_bytes(b"test image")
+        result = self.run_prep("--config", str(self.config), "--modality", "DTI", "--non-interactive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Cohort data preparation completed", result.stdout)
+        self.assertIn("DTI_FILES_VALIDATED=(gFA)", (self.study / "config_dti.sh").read_text())
+
+    def test_missing_inputs_fail_instead_of_reporting_preparation_success(self):
+        result = self.run_prep("--config", str(self.config), "--modality", "DTI", "--non-interactive")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not pass validation", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,41 +1,5 @@
 #!/usr/bin/env bash
-
-# VLAD requires associative arrays and other features introduced in Bash 4.
-# If an older Bash launched this script, restart it with a compatible interpreter
-# already installed on the system. This does not change the user's login shell.
-if ((BASH_VERSINFO[0] < 4)); then
-    compatible_bash=""
-    path_bash=$(command -v bash 2>/dev/null || true)
-
-    for candidate in \
-        "${VLAD_BASH_BIN:-}" \
-        "$path_bash" \
-        /opt/homebrew/bin/bash \
-        /usr/local/bin/bash \
-        /usr/bin/bash \
-        /bin/bash; do
-        [[ -n "$candidate" && -x "$candidate" ]] || continue
-        if "$candidate" -c '((BASH_VERSINFO[0] >= 4))' >/dev/null 2>&1; then
-            compatible_bash="$candidate"
-            break
-        fi
-    done
-
-    if [[ -z "$compatible_bash" ]]; then
-        printf 'Error: %s requires Bash 4 or newer (currently Bash %s).\n' "$(basename "${BASH_SOURCE[0]}")" "$BASH_VERSION" >&2
-        printf 'Install a newer Bash (on macOS: brew install bash), or set VLAD_BASH_BIN=/path/to/bash.\n' >&2
-        exit 1
-    fi
-
-    script_path="${BASH_SOURCE[0]}"
-    if [[ "$script_path" != /* ]]; then
-        script_path="$(cd "$(dirname "$script_path")" && pwd)/$(basename "$script_path")"
-    fi
-
-    printf 'Restarting %s with Bash %s at %s.\n' "$(basename "$script_path")" "$("$compatible_bash" -c 'printf "%s" "$BASH_VERSION"')" "$compatible_bash" >&2
-    exec "$compatible_bash" "$script_path" "$@"
-fi
-
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 #----------------------------
 #VLAD for MRSI : The final script
 #----------------------------
@@ -102,7 +66,7 @@ fi
 
 ######### LOADING CONFIGURATION (1st step)
 # Path to the VLAD_configs.txt file
-vlad_config="VLAD_configs.txt"
+vlad_config="$VLAD_CONFIG_FILE"
 
 # Function to display available COHORTs and select one
 select_cohort() {
@@ -126,17 +90,6 @@ select_cohort() {
         exit 1
     fi
 }
-
-# Read the paths to config_global.sh files into an array
-if [[ -f "$vlad_config" ]]; then
-    config_files=()
-    while IFS= read -r line; do
-        config_files+=("$line")
-    done <"$vlad_config"
-else
-    echo "Error: VLAD_configs.txt not found. Please, run setup_VLAD.sh first and configure at least one cohort :-)"
-    exit 1
-fi
 
 trim_whitespace() {
     local str="$1"
@@ -198,7 +151,8 @@ ORIGINAL_ARGS=("$@")
 
 BATCH_MODE="off"
 BATCH_WORKER=false
-BATCH_FILE="$(cd "$(dirname "$0")" && pwd)/VLAD_batch_commands.txt"
+NON_INTERACTIVE=false
+BATCH_FILE="$VLAD_BATCH_FILE"
 
 run_batch_commands() {
     local batch_file="$1"
@@ -384,7 +338,7 @@ display_help() {
     echo "	- By default randomise will be done with 100 permutations. Use the -p option to change it. Read further to understand this low number"
     echo "	- For the moment, only works for group difference or quantitative values. Other options will be added if needed. Detection of type of analysis is automatic"
     echo "  - To stop randomise analysing voxels that don't have enough \"valuable\" values, we multiply the WM/GM masks with a global quality mask. By default, it take into acount the voxel if >68% of the participant have a value. Value can be change with --qualithresh"
-    echo "  - Auto-integration in R done. Rmarkdown file could be prettier, but it works until refinements."
+    echo "  - HTML reporting runs in Python; no R or Pandoc installation is required."
 
     echo "Usage: $0 [OPTIONS]"
     echo "Options:"
@@ -420,9 +374,10 @@ display_help() {
     #echo "  --difflipid             If you have different lipid suppression. Will remind you to put it in the matrix and will select a different folder to find the maps"
     echo "  --remakeall              Delete the folders associated with the name in Cartes4D/, Results/ and the List"
     echo "  --prepare                Do only the preparation of analysis : List of subjects, Matrix and 4D card. If -cm is specified, it will also do it."
-    echo "  --analyze                Do only the analysis part : checking for the Randomise results and doing the sum-up with R"
+    echo "  --analyze                Do only the analysis part : checking for the Randomise results and generating the Python summary report"
+    echo "  --non-interactive        Use prebuilt design/subject files and never open dialogs or wait for terminal input"
     echo "  --batch <mode>           Batch workflow mode: queue/add (store analysis command after --prepare), run (execute queued commands), worker (internal)"
-    echo "  --batch-file <path>      Optional path for batch command file (default: script directory/VLAD_batch_commands.txt)"
+    echo "  --batch-file <path>      Optional path for batch command file (default: VLAD_BATCH_FILE or repository/VLAD_batch_commands.txt)"
     echo "  --python-env <name>      Use this pyenv environment for VLAD Python scripts (for example: venv-mri)"
     echo ""
     echo "------------------------- "
@@ -443,7 +398,6 @@ NBPERMUT=300
 #CONC=false
 MASKS=('white-grey-matter')
 QUALITRESH=68
-RANALYSE=true
 PARALLEL="_parallel"
 ONLYORIGINAL=false
 DOLIST=false
@@ -657,6 +611,9 @@ while [[ $# -gt 0 ]]; do
         cerebellum)
             MASKS=('white-grey-matter-cerebellum')
             ;;
+        population)
+            MASKS=('population')
+            ;;
         *)
             echo "Invalid --mask value: $mask_choice"
             display_help
@@ -731,6 +688,10 @@ while [[ $# -gt 0 ]]; do
         PARALLEL=""
         shift
         ;;
+    --non-interactive)
+        NON_INTERACTIVE=true
+        shift
+        ;;
     --remakeall)
         REMAKEALL=true
         shift
@@ -787,6 +748,7 @@ while [[ $# -gt 0 ]]; do
             exit 1
         fi
         VLAD_PYTHON_ENV="$2"
+        VLAD_PYTHON_BIN=""  # An explicit --python-env overrides the automatic interpreter.
         shift 2
         ;;
     *)
@@ -796,6 +758,21 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
+
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    if [[ -z "${cohort_arg:-}" || -z "$NAME" || -z "$MATRIX" ]]; then
+        echo "Non-interactive analysis requires --cohort, --name and --matrix." >&2
+        exit 1
+    fi
+    if [[ ! "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ || ! "$MATRIX" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]; then
+        echo "Non-interactive analysis/matrix names allow only letters, numbers and dashes." >&2
+        exit 1
+    fi
+    if [[ "$REMAKEALL" == true ]]; then
+        echo "--remakeall is unavailable in non-interactive mode; existing study data will not be deleted." >&2
+        exit 1
+    fi
+fi
 
 if [[ "${BATCH_MODE}" == "add" ]]; then
     BATCH_MODE="queue"
@@ -813,6 +790,18 @@ fi
 if [[ "${BATCH_MODE}" == "run" ]]; then
     run_batch_commands "${BATCH_FILE}"
     exit $?
+fi
+
+# Read the paths to config_global.sh files into an array
+if [[ -f "$vlad_config" ]]; then
+    config_files=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        config_files+=("$line")
+    done <"$vlad_config"
+else
+    echo "Error: cohort registry not found: $vlad_config. Run vlad prep to configure a cohort, or set VLAD_CONFIG_FILE." >&2
+    exit 1
 fi
 
 if [[ "${BATCH_MODE}" == "queue" && ${RANDOMISING} == true ]]; then
@@ -919,16 +908,16 @@ else
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-: "${RANALYSE_CREATION_SCRIPT:=${SCRIPT_DIR}/Randomise_sum_up_v3.Rmd}"
-: "${RANALYSE_CREATION_SCRIPT_SWE:=${SCRIPT_DIR}/SWE_sum_up_v1.5.2.Rmd}"
-: "${MATRIX_CREATION_SCRIPT_SWE:=${SCRIPT_DIR}/create_matrix_VLADlov_swe_alpha2.py}"
-: "${MATRIX_CREATION_SCRIPT:=${SCRIPT_DIR}/create_matrix_randoMRSI_beta7.py}"
-: "${SNAPSHOT_CREATION_SCRIPT:=${SCRIPT_DIR}/snapshot_results_randomise_beta5.py}"
+SCRIPT_DIR="${VLAD_HOME}"
+PYTHON_HELPERS="${VLAD_HOME}/src/vlad/legacy"
+[[ -d "$PYTHON_HELPERS" ]] || PYTHON_HELPERS="${VLAD_HOME}/../legacy"
+MATRIX_CREATION_SCRIPT_SWE="$(vlad_resolve_helper_path "${MATRIX_CREATION_SCRIPT_SWE:-}" "${PYTHON_HELPERS}/create_matrix_VLADlov_swe_alpha2.py")"
+MATRIX_CREATION_SCRIPT="$(vlad_resolve_helper_path "${MATRIX_CREATION_SCRIPT:-}" "${PYTHON_HELPERS}/create_matrix_randoMRSI_beta7.py")"
+SNAPSHOT_CREATION_SCRIPT="$(vlad_resolve_helper_path "${SNAPSHOT_CREATION_SCRIPT:-}" "${PYTHON_HELPERS}/snapshot_results_randomise_beta5.py")"
 
 configure_python
 
-cd ${GLOBAL_DIR}
+cd "${GLOBAL_DIR}" || exit 1
 
 type_images=$(echo "$type_images" | tr '[:upper:]' '[:lower:]')
 
@@ -947,6 +936,7 @@ mrsi)
 
     SPACE_LABEL_SETTING=${MRSI_SPACE_LABEL:-mni}
     EXTRA_TAGS_SETTING=${MRSI_EXTRA_TAGS:-}
+    PREPARED_MANIFEST=${MRSI_MANIFEST:-}
 
     data_type="mrsi" #to add to config
     acquisition=$(resolve_mrsi_analysis_description) || exit 1
@@ -1090,6 +1080,9 @@ dti)
         COMPRESSION=""
     fi
 
+    SPACE_LABEL_SETTING=$(trim_whitespace "${DTI_SPACE_LABEL:-mni}")
+    EXTRA_TAGS_SETTING=$(trim_whitespace "${DTI_EXTRA_TAGS:-}")
+    PREPARED_MANIFEST=${DTI_MANIFEST:-}
     dti_data_suffix=$(trim_whitespace "${DTI_DATA_SUFFIX:-dwi}")
     BIDS_INFIX_SETTING=$(resolve_bids_infix "${DTI_BIDS_INFIX:-}" "${DTI_SPACE_LABEL:-mni}" "${DTI_EXTRA_TAGS:-}" "${DTI_ACQ_LABEL:-dti}")
 
@@ -1129,6 +1122,9 @@ structural)
         COMPRESSION=""
     fi
 
+    SPACE_LABEL_SETTING=$(trim_whitespace "${STRUCTURAL_SPACE_LABEL:-mni}")
+    EXTRA_TAGS_SETTING=$(trim_whitespace "${STRUCTURAL_EXTRA_TAGS:-}")
+    PREPARED_MANIFEST=${STRUCTURAL_MANIFEST:-}
     struct_data_suffix=$(trim_whitespace "${STRUCTURAL_DATA_SUFFIX:-T1w}")
     BIDS_INFIX_SETTING=$(resolve_bids_infix "${STRUCTURAL_BIDS_INFIX:-}" "${STRUCTURAL_SPACE_LABEL:-mni}" "${STRUCTURAL_EXTRA_TAGS:-}" "${STRUCTURAL_ACQ_LABEL:-memprage}")
 
@@ -1184,7 +1180,7 @@ if [[ $EXTRACTING == true ]]; then
     WHATTODO+=("Extraction of significative results; ")
 fi
 if [[ $SUMUP == true ]]; then
-    WHATTODO+=("Sum-up with R markdown; ")
+    WHATTODO+=("Python HTML report; ")
 fi
 echo "What will be done : ${WHATTODO[@]}"
 echo "Number of permutations : $NBPERMUT"
@@ -1265,17 +1261,60 @@ check_names() {
 }
 
 if [[ ${REMAKEALL} == true ]]; then
-    cd ${GLOBAL_DIR}/Cartes4D
+    cd "${GLOBAL_DIR}/Cartes4D" || exit 1
     rm -rf ${NAME}
-    cd ${GLOBAL_DIR}/Results
+    cd "${GLOBAL_DIR}/Results" || exit 1
     rm -rf ${NAME}
-    cd ${GLOBAL_DIR}/Listes
+    cd "${GLOBAL_DIR}/Listes" || exit 1
     rm List_${NAME}.txt
 fi
 
 domatrix() {
+    if [[ "$NON_INTERACTIVE" == true ]]; then
+        local subject_list="${GLOBAL_DIR}/Listes/List_${NAME}.txt"
+        local design_dir="${GLOBAL_DIR}/Results/${NAME}"
+        local required_file
+        local design_points design_waves contrast_waves contrast_points subject
+        if [[ ! -s "$subject_list" ]]; then
+            echo "Subject list missing or empty: $subject_list. Build the design in the browser first." >&2
+            return 1
+        fi
+        for required_file in "${MATRIX}.mat" "${MATRIX}.con"; do
+            if [[ ! -s "${design_dir}/${required_file}" ]]; then
+                echo "Design file missing or empty: ${design_dir}/${required_file}. Build the design in the browser first." >&2
+                return 1
+            fi
+        done
+        if [[ "$LONGITUDINAL" == true && "$LONGITUDINAL_TOOL" == swe && ! -s "${design_dir}/${MATRIX}.sub" ]]; then
+            echo "SwE subject file missing: ${design_dir}/${MATRIX}.sub." >&2
+            return 1
+        fi
+        if [[ "$ANOVA" == 1 && ! -s "${design_dir}/${MATRIX}.fts" ]]; then
+            echo "ANOVA F-test file missing: ${design_dir}/${MATRIX}.fts." >&2
+            return 1
+        fi
+        mapfile -t SUBJECTS < "$subject_list"
+        for subject in "${SUBJECTS[@]}"; do
+            if [[ ! "$subject" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*_[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+                echo "Invalid SUBJECT_VISIT entry in $subject_list: $subject" >&2
+                return 1
+            fi
+        done
+        design_points=$(awk '/^\/NumPoints/ {print $2; exit}' "${design_dir}/${MATRIX}.mat")
+        design_waves=$(awk '/^\/NumWaves/ {print $2; exit}' "${design_dir}/${MATRIX}.mat")
+        contrast_waves=$(awk '/^\/NumWaves/ {print $2; exit}' "${design_dir}/${MATRIX}.con")
+        contrast_points=$(awk '/^\/(NumPoints|NumContrasts)/ {print $2; exit}' "${design_dir}/${MATRIX}.con")
+        if [[ ! "$design_points" =~ ^[1-9][0-9]*$ || ! "$design_waves" =~ ^[1-9][0-9]*$ ||
+              ! "$contrast_waves" =~ ^[1-9][0-9]*$ || ! "$contrast_points" =~ ^[1-9][0-9]*$ ||
+              "$design_points" -ne "${#SUBJECTS[@]}" || "$design_waves" -ne "$contrast_waves" ]]; then
+            echo "Prepared design, contrast and subject-list dimensions disagree. Rebuild the design in the browser." >&2
+            return 1
+        fi
+        echo "Using the prepared design and subject order without interactive prompts."
+        return 0
+    fi
     # Check if the list of subjects is here and create one if needed ---------------------------
-    cd ${GLOBAL_DIR}
+    cd "${GLOBAL_DIR}" || exit 1
 
     if [[ -e "Listes/List_${NAME}.txt" ]]; then
         SUBJECTS=($(cat ${GLOBAL_DIR}/Listes/List_${NAME}.txt))
@@ -1310,7 +1349,7 @@ domatrix() {
                     break
                 elif [[ ${MATRIXRM} == "n" ]]; then
                     echo "Let's delete old files then"
-                    cd ${GLOBAL_DIR}/Results/${NAME}
+                    cd "${GLOBAL_DIR}/Results/${NAME}" || exit 1
                     rm ${MATRIX}.csv
                     rm ${MATRIX}.mat
                     rm ${MATRIX}.con
@@ -1366,7 +1405,7 @@ domatrix() {
                     else
 
                         echo "Formating the files generated by the Python files, since randomise is a little bit temperamental... "
-                        cd ${GLOBAL_DIR}/Results/${NAME}
+                        cd "${GLOBAL_DIR}/Results/${NAME}" || exit 1
 
                         Text2Vest ${MATRIX}_mat.txt ${MATRIX}.mat
                         Text2Vest ${MATRIX}_con.txt ${MATRIX}.con
@@ -1407,11 +1446,6 @@ checkmatrix_4d() {
 
     local CARD4Dtocheck=$1
     local card_path="${GLOBAL_DIR}/Cartes4D/${NAME}/${CARD4Dtocheck}"
-
-    if [[ ! -f "${card_path}" ]]; then
-        echo "4D card for matrix compatibility check not found: ${card_path}"
-        return 1
-    fi
 
     check4D=$(fslval "${card_path}" dim4)
     if [[ -z "${check4D}" ]]; then
@@ -1754,6 +1788,20 @@ get_mask_file_path() {
         return 1
     fi
 
+    # Prepared BIDS masks belong to the current managed selection. Legacy
+    # fallbacks can contain masks from an older space or a removed selection.
+    local upper_modality input_mode_setting mask_dir_setting
+    upper_modality=$(printf '%s' "$modality" | tr '[:lower:]' '[:upper:]')
+    input_mode_setting="${upper_modality}_INPUT_MODE"
+    mask_dir_setting="${upper_modality}_MASK_DIR"
+    if [[ "${!input_mode_setting:-legacy}" == bids ]]; then
+        if [[ -n "${!mask_dir_setting:-}" && -f "${!mask_dir_setting}/${mask_filename}" ]]; then
+            echo "${!mask_dir_setting}/${mask_filename}"
+            return 0
+        fi
+        return 1
+    fi
+
     local search_locations=()
     local primary_dir
     primary_dir=$(get_mask_directory_for_modality "$modality")
@@ -1876,6 +1924,7 @@ wrap4dcards() { # This needs to be more flexible...
     local data_type=$1
     local acquisition=$2
     local cardtodo=$3
+    local stack_files=()
 
     #for cardtodo in ${TODO[@]}; do
     echo "Creating 4D card for $cardtodo"
@@ -1906,6 +1955,7 @@ wrap4dcards() { # This needs to be more flexible...
             exit 1
         else
             cp "$FILE_PATH" "${TARGET_DIR}/${sub}-${visit}-${cardtodo}.nii${COMPRESSION}"
+            stack_files+=("${TARGET_DIR}/${sub}-${visit}-${cardtodo}.nii${COMPRESSION}")
         fi
     done
     cd $TARGET_DIR
@@ -1917,7 +1967,9 @@ wrap4dcards() { # This needs to be more flexible...
     fi
     #card4dtodo=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodo}" "${NAME}")
 
-    fslmerge -t ${card4dtodo} *-${cardtodo}.nii${COMPRESSION}
+    # The matrix subject order is authoritative; a filename glob sorts IDs and
+    # can silently exchange data rows when a filtered table is not alphabetic.
+    fslmerge -t "${card4dtodo}" "${stack_files[@]}" || return $?
 
     if [[ ${SMOOTHINGCARDS} == true ]]; then
         if [[ ${type_images} == "mrsi" ]]; then
@@ -1927,13 +1979,14 @@ wrap4dcards() { # This needs to be more flexible...
             cardtodoS="${cardtodo}-smooth${SMOOTHSIGMA}"
             card4dsmoothed=$(name_4d_file "${data_type}" "${acquisition}" "${cardtodoS}" "${NAME}")
         fi
-        fslmaths ${card4dtodo} -s ${SMOOTHSIGMA} ${card4dsmoothed}
+        fslmaths "${card4dtodo}" -s "${SMOOTHSIGMA}" "${card4dsmoothed}" || return $?
         if [[ ${type_images} != "mrsi" ]]; then
-            rm -f ${card4dtodo}
+            rm -f "${card4dtodo}"
         fi
+        card4dtodo="$card4dsmoothed"
     fi
 
-    rm -f *-${cardtodo}.nii${COMPRESSION}
+    rm -f -- "${stack_files[@]}"
     #done
 
 }
@@ -1987,7 +2040,9 @@ wrapmasksmrsi() {
             return 1
         fi
 
-        if [[ ! -f "${TARGET_DIR}/${qmask4dtodo}" ]]; then
+        if [[ ! -f "${TARGET_DIR}/${qmask4dtodo}" ||
+              ( -n "${PREPARED_MANIFEST:-}" && "$PREPARED_MANIFEST" -nt "${TARGET_DIR}/${qmask4dtodo}" ) ||
+              "${GLOBAL_DIR}/Listes/List_${NAME}.txt" -nt "${TARGET_DIR}/${qmask4dtodo}" ]]; then
             echo "Creating QMask for ${MET}"
             subject_qmask_files=()
             for SUBJ in "${SUBJECTS[@]}"; do
@@ -2034,6 +2089,10 @@ wrapmasksmrsi() {
         fslmaths "${MET}_QMask_mean.nii.gz" -thr "0.${QUALITRESH}" -bin "${MET}_Qmask_thr${QUALITRESH}" || return 1
 
         for MASK in "${MASKS[@]}"; do
+            if [[ "$MASK" == population ]]; then
+                cp "${MET}_Qmask_thr${QUALITRESH}.nii.gz" "${MET}_${NAME}mask${MASK}_quali.nii.gz" || return $?
+                continue
+            fi
             mask_filename="HarvardOxford-${MASK}.nii.gz"
             mask_file=$(get_mask_file_path "$mask_filename" "mrsi")
             if [[ -z "$mask_file" ]]; then
@@ -2149,7 +2208,7 @@ randoanalyze() {
 
     met_quali=$(strip_ratio_suffix "${MET}")
 
-    cd ${GLOBAL_DIR}/Results/${NAME}/${MET}/${MATRIX}
+    cd "${GLOBAL_DIR}/Results/${NAME}/${MET}/${MATRIX}" || exit 1
     CARD4D_path="${GLOBAL_DIR}/Cartes4D/${NAME}/"
 
 
@@ -2166,13 +2225,13 @@ randoanalyze() {
     # Finding how many contrasts have been done (use design files to avoid stale .nii/.nii.gz)
     if [[ ${ANOVA} -eq 0 ]]; then
         TEST="t"
-        CONTRASTS=$(awk '/^\/NumPoints/ {print $2; exit}' "../../${MATRIX}.con")
+        CONTRASTS=$(awk '/^\/(NumPoints|NumContrasts)/ {print $2; exit}' "../../${MATRIX}.con")
     else
         TEST="f"
         if [[ -f "../../${MATRIX}.fts" ]]; then
             CONTRASTS=$(awk '/^\/NumContrasts/ {print $2; exit}' "../../${MATRIX}.fts")
         else
-            CONTRASTS=$(awk '/^\/NumPoints/ {print $2; exit}' "../../${MATRIX}.con")
+            CONTRASTS=$(awk '/^\/(NumPoints|NumContrasts)/ {print $2; exit}' "../../${MATRIX}.con")
         fi
     fi
     if [[ -z "${CONTRASTS}" ]]; then
@@ -2181,7 +2240,7 @@ randoanalyze() {
     fi
 
     for ((i = 1; i <= ${CONTRASTS}; i++)); do
-        cd ${GLOBAL_DIR}/Results/${NAME}/${MET}/${MATRIX}
+        cd "${GLOBAL_DIR}/Results/${NAME}/${MET}/${MATRIX}" || exit 1
 
         if [[ -e min_max.txt ]]; then
             rm min_max.txt
@@ -2450,7 +2509,7 @@ randoextract() {
 
     NBVOL=$(fslnvols ${OrigCARD4D})
     #Starting Randomise
-    cd ${GLOBAL_DIR}/Results/${NAME}/
+    cd "${GLOBAL_DIR}/Results/${NAME}/" || exit 1
 
     if [[ ! -d "${MET}/${MATRIX}" ]]; then
         mkdir -p ${MET}/${MATRIX}
@@ -2465,13 +2524,13 @@ randoextract() {
         if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then # CHANGER SUFFIXE ?
 
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}_CM"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T || return $?
             wait
             echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
         else
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -m ${QUALIMASK} -n ${NBPERMUT} -T
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -m ${QUALIMASK} -n ${NBPERMUT} -T || return $?
             wait
             echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
         fi
@@ -2479,13 +2538,13 @@ randoextract() {
         if [[ ${CONFIRMATION} == true && ${CONFIRMATION_MASKS} == true ]]; then
 
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}_CM"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con -f ../../${MATRIX}.fts --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ${CM_DIR}/${MATRIX}-CM.mat -t ${CM_DIR}/${MATRIX}-CM.con -f ../../${MATRIX}.fts --vxl=-"${num_waves}" --vxf="${CM_DIR}/${MATRIX}-CM.nii.gz" -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly || return $?
             wait
             echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made in CONFIRMATION MASKED mode" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
         else
             #RESULT="rdm_${MET}_${NAME}_${MATRIX}_${acquisition}_${MASK}"
-            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -f ../../${MATRIX}.fts -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly
+            randomise${PARALLEL} -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -f ../../${MATRIX}.fts -m ${QUALIMASK} -n ${NBPERMUT} -T -D --fonly || return $?
             wait
             echo "Analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made with ${NBPERMUT} permutations" >>../../Result_randomise_${NAME}_${MATRIX}.txt
         fi
@@ -2584,7 +2643,7 @@ sweprocess() {
 
     NBVOL=$(fslnvols ${OrigCARD4D})
     #Starting swe
-    cd ${GLOBAL_DIR}/Results/${NAME}/
+    cd "${GLOBAL_DIR}/Results/${NAME}/" || exit 1
 
     if [[ ! -d "${MET}/${MATRIX}" ]]; then
         mkdir -p ${MET}/${MATRIX}
@@ -2596,7 +2655,7 @@ sweprocess() {
 
     echo "Sandwiching and doing analyses..."
     #subfile="../../${MATRIX}_design_sub.txt"
-    swe -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -s ../../${MATRIX}.sub --wb -n ${NBPERMUT} -T --corrp --modified -m ${QUALIMASK} --glm_output
+    swe -i ${CARD4D_path}/${CARD4D} -o ${RESULT} -d ../../${MATRIX}.mat -t ../../${MATRIX}.con -s ../../${MATRIX}.sub --wb -n ${NBPERMUT} -T --corrp --modified -m ${QUALIMASK} --glm_output || return $?
 
     echo "SWE analyse for the ${NAME} subjects using the ${MATRIX} matrix, for ${MET}, acquired in ${RUN_LABEL} in ${MASK} region has been made" >>../../Result_randomise_${NAME}_${MATRIX}.txt
 
@@ -2614,93 +2673,60 @@ sweprocess() {
 
 
 rsumup() {
-    # R Processing
+    # The legacy function name is retained; reports execute only Python.
+    local report_kind="randomise"
+    local output_suffix="${type_images}"
+    local report_script="${VLAD_HOME}/src/vlad/reporting/run.py"
+    local report_name
+    local report_args=()
 
     echo "==========================="
-    echo "Launching R analysis"
+    echo "Generating Python report"
     echo "==========================="
-    cd ${GLOBAL_DIR}/Results/${NAME}
-    if [[ -e "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
-        if [[ -s "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
+    cd "${GLOBAL_DIR}/Results/${NAME}" || return 1
 
-            #MAIN_VARIABLE=$(cat ${GLOBAL_DIR}/Results/${NAME}/main_variable_${MATRIX}.txt) -> no need anymore
-            #echo "The main variable selected in Python was: $MAIN_VARIABLE"
+    if [[ ${LONGITUDINAL} == true && ${LONGITUDINAL_TOOL} == "swe" ]]; then
+        report_kind="swe"
+        output_suffix="${type_images}-swe"
+    fi
+    report_name="${NAME}_${MATRIX}_${output_suffix}"
+    if [[ ${CONFIRMATION} == true ]]; then
+        report_name+="-confirmation"
+    fi
+    report_name+=".html"
 
-            SWE_SUMUP=false
-            if [[ ${LONGITUDINAL} == true && ${LONGITUDINAL_TOOL} == "swe" ]]; then
-                SWE_SUMUP=true
-            fi
-
-            if [[ ${SWE_SUMUP} == true ]]; then
-                RMD_TO_USE=${RANALYSE_CREATION_SCRIPT_SWE}
-                RMD_BASENAME=$(basename "${RMD_TO_USE}")
-                OUTPUT_SUFFIX="${type_images}-swe"
-            else
-                RMD_TO_USE=${RANALYSE_CREATION_SCRIPT}
-                RMD_BASENAME=$(basename "${RMD_TO_USE}")
-                OUTPUT_SUFFIX="${type_images}"
-            fi
-
-            if [[ ! -f "${RMD_TO_USE}" ]]; then
-                echo "R markdown file ${RMD_TO_USE} not found, falling back to ${RANALYSE_CREATION_SCRIPT}"
-                RMD_TO_USE=${RANALYSE_CREATION_SCRIPT}
-                RMD_BASENAME=$(basename "${RMD_TO_USE}")
-                SWE_SUMUP=false
-                OUTPUT_SUFFIX="${type_images}"
-            fi
-
-            cp "${RMD_TO_USE}" "${GLOBAL_DIR}/Results/${NAME}/"
-
-            #ADD IF EXPLORATORY OR CONFIRMATION ANALYSIS + NB of PERMUTATIONS
-            #Pour la V2 on lui passe aussi le path où on enregistre tout ça...
-            # => NAME_IMAGE="${MET}_${MATRIX}_${acquisition}_${MASK}" Il faut pouvoir lui envoyer toutes ces informations là. 
-            if [[ ${CONFIRMATION} == false ]]; then
-                if [[ ${SWE_SUMUP} == true ]]; then
-                    Rscript -e "rmarkdown::render('${RMD_BASENAME}', output_file=paste0('$NAME', '_', '$MATRIX', '_', '${OUTPUT_SUFFIX}', '.html'), params=list(analysis_name='$NAME', matrix_name='$MATRIX', number_permut='$NBPERMUT', savepath='${DIR_RANALYSES}', file_type='${type_images}'))" #En faire une variable de ce fucking path
-                else
-                    Rscript -e "rmarkdown::render('${RMD_BASENAME}', output_file=paste0('$NAME', '_', '$MATRIX', '_', '${OUTPUT_SUFFIX}', '.html'), params=list(analysis_name='$NAME', matrix_name='$MATRIX', number_permut='$NBPERMUT', savepath='${DIR_RANALYSES}'))" #En faire une variable de ce fucking path
-                fi
-                wait
-                cp ${NAME}_${MATRIX}_${OUTPUT_SUFFIX}.html ../${NAME}_${MATRIX}_${OUTPUT_SUFFIX}.html
-            else
-                if [[ ${SWE_SUMUP} == true ]]; then
-                    Rscript -e "rmarkdown::render('${RMD_BASENAME}', output_file=paste0('$NAME', '_', '$MATRIX', '_', '${OUTPUT_SUFFIX}', '-confirmation.html'), params=list(analysis_name='$NAME', matrix_name='$MATRIX', number_permut='$NBPERMUT', savepath='${DIR_RANALYSES}', file_type='${type_images}'))" #Same as plus haut
-                else
-                    Rscript -e "rmarkdown::render('${RMD_BASENAME}', output_file=paste0('$NAME', '_', '$MATRIX', '_', '${OUTPUT_SUFFIX}', '-confirmation.html'), params=list(analysis_name='$NAME', matrix_name='$MATRIX', number_permut='$NBPERMUT', savepath='${DIR_RANALYSES}'))" #Same as plus haut
-                fi
-                wait
-                cp ${NAME}_${MATRIX}_${OUTPUT_SUFFIX}-confirmation.html ../${NAME}_${MATRIX}_${OUTPUT_SUFFIX}-confirmation.html
-            fi
-
-            if (($NBPERMUT < 500)); then
-                if [[ ${BATCH_WORKER} == true ]]; then
-                    echo "Low-permutation reminder skipped in batch worker mode."
-                else
-                    echo "Analyse seems to have produce significative results, but with a poor number of permutations. Would you like to run a confirmation later ? y/yes for yes, any other answer will exit"
-                    read RUNLATER
-                    if [[ $RUNLATER == "y" || $RUNLATER == "yes" || $RUNLATER == "Y" || $RUNLATER == "YES" ]]; then
-                        if [[ ! -e "../RandoMRSI_torun.txt" ]]; then
-                            touch ../RandoMRSI_torun.txt
-                        fi
-
-                        echo "$reconstructed_command --confirmation little" >>../RandoMRSI_torun.txt
-                        echo "Command added. Run RandoMRSI_run.sh during a peaceful night ;-)"
-                    else
-                        echo "Don't forget that your p is +/- 0.04 if permut at 100 and +/- 0.02 if permut at 500 ! See you soon !"
-                    fi
-                fi
-            fi
-
-        else
-            echo "Nothing to analyse in R, no significative analysis seems to exist"
-        fi
-    elif [[ ! -e "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
-        echo "There is a bug, no global file found ! Can't run R without the file... Please check the script"
-        exit 1
-    else
-        echo "No analyse with R asked"
+    # A wheel keeps Python modules next to resources; a checkout uses src/.
+    [[ -f "$report_script" ]] || report_script="${VLAD_HOME}/../reporting/run.py"
+    if [[ ! -f "$report_script" ]]; then
+        echo "Python reporting entry point not found: $report_script. Reinstall VLAD." >&2
+        return 1
     fi
 
+    report_args=(
+        --kind "$report_kind"
+        --results-dir "$PWD"
+        --analysis-name "$NAME"
+        --matrix-name "$MATRIX"
+        --permutations "$NBPERMUT"
+        --export-dir "${DIR_RANALYSES:-$PWD}"
+        --modality "$type_images"
+        --output "${PWD}/${report_name}"
+    )
+    [[ ${CONFIRMATION} == true ]] && report_args+=(--confirmation)
+    [[ -n "${VLAD_SUBJECT_COLUMN:-}" ]] && report_args+=(--subject-column "$VLAD_SUBJECT_COLUMN")
+    [[ -n "${VLAD_VISIT_COLUMN:-}" ]] && report_args+=(--visit-column "$VLAD_VISIT_COLUMN")
+    "${VLAD_PYTHON_BIN}" "$report_script" "${report_args[@]}" || return $?
+    cp "$report_name" "../${report_name}" || return 1
+
+    if ((NBPERMUT < 500)) && [[ ${BATCH_WORKER} != true && "$NON_INTERACTIVE" != true ]]; then
+        echo "This exploratory report uses fewer than 500 permutations. Queue a confirmation analysis? (y/yes)"
+        read -r RUNLATER
+        if [[ "$RUNLATER" =~ ^([Yy]|[Yy][Ee][Ss])$ ]]; then
+            printf '%s --confirmation little\n' "$reconstructed_command" >>../RandoMRSI_torun.txt
+            echo "Confirmation command saved to ../RandoMRSI_torun.txt"
+        fi
+    fi
+    return 0
 }
 
 ###############################################################
@@ -2712,7 +2738,7 @@ if [[ ${PREPARE} == true ]]; then
     check_names
 
     echo "Doing Matrix"
-    domatrix
+    domatrix || exit $?
 
     #--------
     # 4D cards + masks part
@@ -2730,8 +2756,11 @@ if [[ ${PREPARE} == true ]]; then
             exit 1
         fi
         card4dtocheck="${CHECKCARD4D}"
-        if [[ ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${analysis_card4d} || ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${card4dtocheck} ]]; then #We have to find something else that this DO4D variable...
-            wrap4dcards ${data_type} ${acquisition} ${cardtodo}
+        if [[ ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${analysis_card4d} ||
+              ! -e ${GLOBAL_DIR}/Cartes4D/${NAME}/${card4dtocheck} ||
+              ( -n "${PREPARED_MANIFEST:-}" && "$PREPARED_MANIFEST" -nt "${GLOBAL_DIR}/Cartes4D/${NAME}/${analysis_card4d}" ) ||
+              "${GLOBAL_DIR}/Listes/List_${NAME}.txt" -nt "${GLOBAL_DIR}/Cartes4D/${NAME}/${analysis_card4d}" ]]; then
+            wrap4dcards ${data_type} ${acquisition} ${cardtodo} || exit $?
 
             echo "Checking matrix and 4D card compatibility"
             checkmatrix_4d "${card4dtocheck}" || exit 1
@@ -2763,7 +2792,7 @@ fi
 # for MASK in ${MASKS[@]}; do
 
 # while true; do
-# cd ${GLOBAL_DIR}/Masques
+# cd "${GLOBAL_DIR}/Masques" || exit 1
 # compare_nifti_files
 
 #--------
@@ -2781,6 +2810,10 @@ if [[ ${RANDOMISING} == true ]]; then
         echo "Using DTI analysis mask: $DTI_ANALYSIS_MASK_PATH"
     else
         for RANDOMASK in ${MASKS[@]}; do
+            if [[ "$RANDOMASK" == population ]]; then
+                [[ "$type_images" == mrsi ]] || { echo "Population quality masks are available for MRSI only." >&2; exit 1; }
+                continue
+            fi
             mask="HarvardOxford-${RANDOMASK}.nii.gz"
             mask_path=$(get_mask_file_path "${mask}" "${type_images}")
             if [[ -z "$mask_path" ]]; then
@@ -2798,7 +2831,7 @@ if [[ ${RANDOMISING} == true ]]; then
 
 
     # for RANDOMASK in ${MASKS[@]}; do
-    #     cd ${GLOBAL_DIR}/Masques/${type_images}
+    #     cd "${GLOBAL_DIR}/Masques/${type_images}" || exit 1
     #     mask="HarvardOxford-${RANDOMASK}.nii.gz"
     #     echo "Checking masks, beta mode"
     #     if [[ ! -e ${mask} ]]; then
@@ -2816,12 +2849,12 @@ if [[ ${RANDOMISING} == true ]]; then
     # done
 
     if [[ ${type_images} == "mrsi" ]]; then
-        wrapmasksmrsi || exit 1
+        wrapmasksmrsi || exit $?
     fi
 
     
 
-    cd ${GLOBAL_DIR}/Results/${NAME}
+    cd "${GLOBAL_DIR}/Results/${NAME}" || exit 1
     for analysetodo in ${TODO[@]}; do
         mkdir -p ${analysetodo}
     done
@@ -2841,17 +2874,17 @@ if [[ ${RANDOMISING} == true ]]; then
         echo "===============================================" >>Result_randomise_${NAME}_${MATRIX}.txt
     fi
 
-    if [[ $CONFIRMATION == false && $BATCH_WORKER == false ]]; then
+    if [[ $CONFIRMATION == false && $BATCH_WORKER == false && "$NON_INTERACTIVE" != true ]]; then
         while true; do
             if [[ ! -e "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
-                echo "We're all good for R"
+                echo "The report input list is ready"
                 touch To_analyse_with_R_${NAME}_${MATRIX}.txt
                 break
             else
-                echo "/!\ WARNING : Already some analyses done with R or wanted to be sent to R. Type add to add to previous analyses Delete to delete previous. Exit to start again."
+                echo "/!\ WARNING : A report input list already exists. Type add to add to previous analyses Delete to delete previous. Exit to start again."
                 read CONTINUE
                 if [[ ${CONTINUE} == "Delete" || ${CONTINUE} == "delete" ]]; then
-                    echo "Deleting previous analysis paths for R"
+                    echo "Deleting previous report input paths"
                     rm To_analyse_with_R_${NAME}_${MATRIX}.txt
                     touch To_analyse_with_R_${NAME}_${MATRIX}.txt
                     break
@@ -2867,7 +2900,7 @@ if [[ ${RANDOMISING} == true ]]; then
             fi
         done
     else
-        cd ${GLOBAL_DIR}/Results/${NAME}
+        cd "${GLOBAL_DIR}/Results/${NAME}" || exit 1
         if [[ -e "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
             rm To_analyse_with_R_${NAME}_${MATRIX}.txt
         fi
@@ -2877,7 +2910,7 @@ if [[ ${RANDOMISING} == true ]]; then
     # Launching Randoextract function
 
     if [[ -e "${MATRIX}.mat" ]]; then
-        if [[ ${CONFIRMATION} == false && ${BATCH_WORKER} == false ]]; then
+        if [[ ${CONFIRMATION} == false && ${BATCH_WORKER} == false && "$NON_INTERACTIVE" != true ]]; then
             total_to_run=${#TODO[@]}
             if ((total_to_run > 20)); then
                 read -p "${total_to_run} analyses have to run, which is a lot, are you sure you want to continue? (y/n): " continue_many
@@ -2899,9 +2932,9 @@ if [[ ${RANDOMISING} == true ]]; then
 
                 OUTPUT="rdm_${thingtodo}_${NAME}_${MATRIX}_${RUN_LABEL}_${RANDOMASK}${confm}"
                 if [[ ${LONGITUDINAL} == true && ${LONGITUDINAL_TOOL} == "swe" ]]; then
-                    sweprocess ${RANDOMASK} ${thingtodo} ${OUTPUT}
+                    sweprocess ${RANDOMASK} ${thingtodo} ${OUTPUT} || exit $?
                 else
-                    randoextract ${RANDOMASK} ${thingtodo} ${OUTPUT}
+                    randoextract ${RANDOMASK} ${thingtodo} ${OUTPUT} || exit $?
                 fi
             done
         done
@@ -2913,7 +2946,7 @@ if [[ ${RANDOMISING} == true ]]; then
 fi
 
 if [[ ${EXTRACTING} == true ]]; then
-    cd ${GLOBAL_DIR}/Results/${NAME}
+    cd "${GLOBAL_DIR}/Results/${NAME}" || exit 1
     if [[ -s "To_analyse_with_R_${NAME}_${MATRIX}.txt" ]]; then
         rm To_analyse_with_R_${NAME}_${MATRIX}.txt
         touch To_analyse_with_R_${NAME}_${MATRIX}.txt
@@ -2941,5 +2974,5 @@ if [[ ${EXTRACTING} == true ]]; then
 fi
 
 if [[ ${SUMUP} == true ]]; then
-    rsumup
+    rsumup || exit $?
 fi
