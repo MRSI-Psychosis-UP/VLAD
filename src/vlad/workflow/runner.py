@@ -139,7 +139,10 @@ def _emit_progress(metabolite, stage, current, total=None, detail=''):
 def randomise_command(plan, metabolite, executable='randomise'):
     directory = Path(plan['output_dir']) / metabolite
     settings = plan['randomise']
-    argv = [executable, '-i', str(directory / 'signals.nii.gz'), '-o', str(directory / 'randomise'),
+    analyte = _analyte(plan, metabolite)
+    input_stack = ('signals_raw.nii.gz' if settings.get('gauge_correction') and
+                   analyte.get('view', 'raw') == 'raw' else 'signals.nii.gz')
+    argv = [executable, '-i', str(directory / input_stack), '-o', str(directory / 'randomise'),
             '-m', str(directory / 'population_mask.nii.gz'), '-d', str(Path(plan['output_dir']) / 'design.mat'),
             '-t', str(Path(plan['output_dir']) / 'design.con'), '-n', str(settings['permutations'])]
     if settings.get('tfce', True):
@@ -235,13 +238,21 @@ def validate_plan(plan):
         raise ValueError('Analyte specifications must match the ordered output labels.')
     source_metabolites = set(plan['data'].get('source_metabolites', metabolites))
     for item in analytes:
-        if (item.get('operation') not in {'identity', 'ratio'} or not item.get('label') or
+        if (item.get('operation') not in {'identity', 'ratio', 'contrast'} or not item.get('label') or
                 any(char in item['label'] for char in '\r\n\t\x00') or
                 not item.get('components') or not set(item['components']) <= source_metabolites):
             raise ValueError(f'Invalid analyte specification: {item!r}')
-        if item['operation'] == 'ratio' and (item.get('numerator') not in item['components'] or
+        numerator_components = item.get('numerator_components', [item.get('numerator')])
+        if item['operation'] == 'ratio' and (not numerator_components or
+                                             not set(numerator_components) <= set(item['components']) or
                                              not item.get('denominator')):
             raise ValueError(f'Invalid ratio specification: {item["label"]}')
+        if item.get('view', 'raw') not in {'raw', 'gauge'}:
+            raise ValueError(f'Invalid map view for {item["label"]}.')
+        if item['operation'] == 'contrast' and (
+                len(item.get('coefficients', [])) != len(item['components']) or
+                not all(math.isfinite(float(value)) for value in item['coefficients'])):
+            raise ValueError(f'Invalid gauge-map contrast: {item["label"]}.')
     if plan['data']['space'].lower() in {'native', 't1w', 'dwi', 't2w', 'individual', 'orig', 'original'}:
         raise ValueError('Group analysis requires a common template space, not subject-native coordinates.')
     design = pd.DataFrame(model['matrix'], columns=model['columns'])
@@ -260,6 +271,16 @@ def validate_plan(plan):
         raise ValueError('Gauge correction must be enabled or disabled.')
     if gauge and len(metabolites) < 2:
         raise ValueError('Gauge correction requires at least two selected metabolites.')
+    if any(item.get('view') == 'gauge' for item in analytes) and not gauge:
+        raise ValueError('Entries beginning with z require gauge correction. Enable gauge correction in Data.')
+    if gauge and len([item for item in analytes if item['operation'] != 'contrast']) < 2:
+        raise ValueError('Gauge correction needs at least two metabolite or ratio maps; contrasts do not count toward this requirement.')
+    selected_ids = {item['id'] for item in analytes}
+    for item in analytes:
+        if item['operation'] == 'contrast' and any(
+                component not in selected_ids and f'z-{component}' not in selected_ids
+                for component in item['components']):
+            raise ValueError(f'{item["label"]}: include each component map (for example z_{item["components"][0]}) so VLAD can contrast their gauge-corrected values.')
     if not options.get('tfce') and not options.get('voxelwise'):
         raise ValueError('Enable TFCE or voxelwise corrected inference.')
     for field in ('tfce_h', 'tfce_e', 'variance_smoothing'):
@@ -325,12 +346,18 @@ def _load_analyte(row, analyte, reference=None):
             local_reference = image
         images[component] = image
         arrays[component] = image.get_fdata(dtype=np.float32)
-    numerator = arrays[analyte['numerator']]
+    numerator_components = analyte.get('numerator_components', [analyte['numerator']])
+    numerator = np.sum([arrays[name] for name in numerator_components], axis=0,
+                       dtype=np.float64).astype(np.float32) if len(numerator_components) > 1 else arrays[numerator_components[0]]
     valid = np.ones(numerator.shape, dtype=bool)
     for values in arrays.values():
         valid &= np.isfinite(values)
     if analyte['operation'] == 'identity':
         signal = numerator
+    elif analyte['operation'] == 'contrast':
+        signal = np.zeros(numerator.shape, dtype=np.float32)
+        for component, coefficient in zip(analyte['components'], analyte['coefficients']):
+            signal += arrays[component] * float(coefficient)
     else:
         denominator = np.sum([arrays[name] for name in analyte['denominator']],
                              axis=0, dtype=np.float64)
@@ -349,7 +376,7 @@ def _save(data, reference, path):
 def _apply_gauge_correction(plan, reference, group_means):
     """Create gauge diagnostics and corrected 4D stacks before inference."""
     output = Path(plan['output_dir'])
-    analytes = _analytes(plan)
+    analytes = [item for item in _analytes(plan) if item['operation'] != 'contrast']
     metabolites = [item['id'] for item in analytes]
     means = np.stack([group_means[metabolite] for metabolite in metabolites])
     met_std, z_maps, gauge_term = gauge_from_group_means(means)
@@ -387,6 +414,19 @@ def _apply_gauge_correction(plan, reference, group_means):
         del corrected
         (directory / 'corrected.npy').unlink()
         _emit(f'[{analyte["label"]}] Gauge-corrected 4D signal image saved.')
+    for analyte in _analytes(plan):
+        if analyte['operation'] != 'contrast':
+            continue
+        directory = output / analyte['id']
+        selected_ids = {item['id'] for item in _analytes(plan)}
+        component_ids = [f'z-{name}' if f'z-{name}' in selected_ids else name
+                         for name in analyte['components']]
+        component_images = [nib.load(output / name / 'signals.nii.gz')
+                            for name in component_ids]
+        result = np.zeros(component_images[0].shape, dtype=np.float32)
+        for component, coefficient in zip(component_images, analyte['coefficients']):
+            result += np.asanyarray(component.dataobj, dtype=np.float32) * float(coefficient)
+        _save(result, reference, directory / 'signals.nii.gz')
 
 
 def execute(plan, *, prepare_only=False):
@@ -511,7 +551,7 @@ def execute(plan, *, prepare_only=False):
         summary.sort(key=lambda row: (metabolite_order[row.get('analyte', row['metabolite'])],
                                       contrast_order[row['contrast']], row['map']))
     pd.DataFrame(summary).to_csv(output / 'results.tsv', sep='\t', index=False)
-    gauge_note = ('Gauge correction was applied before Randomise; raw stacks and gauge diagnostics are retained.'
+    gauge_note = ('Gauge-corrected stacks were generated for z-prefixed outputs; unprefixed metabolite and ratio analyses use raw stacks.'
                   if gauge_enabled else 'Gauge correction was not applied.')
     atomic_text(output / 'results.json', json.dumps({'status': 'prepared' if prepare_only else 'succeeded', 'results': summary,
                 'output_dir': str(output), 'model_columns': model['columns'], 'contrast_labels': model['contrast_labels'],
