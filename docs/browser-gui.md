@@ -34,23 +34,25 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    searches filenames; it does not open NIfTI headers or voxel arrays. Each
    subject/session gets a green **✅ Images found** mark only when every selected
    metabolite has exactly one match. Missing or ambiguous matches show **❌** and
-   are listed in the matching details. The metabolite field also accepts derived
-   voxelwise ratios such as `Glu/GABA`. A ratio can be entered on its own; VLAD
-   discovers both source maps but tests the ratio. For
-   `Glu/SUMOFMETABOLITES`, explicitly list the base maps as well, for example
-   `Glu GABA Gln Glu/SUMOFMETABOLITES`; the denominator is the voxelwise sum of
-   those selected base maps. Nonfinite values and zero denominators are excluded,
-   and a ratio's subject mask is the intersection of its components' quality
-   masks. Base maps listed explicitly are also tested as separate outputs.
+   are listed in the matching details. Plain entries such as `Glu` always test
+   the raw metabolite map. Ratios are calculated voxelwise from raw maps: use
+   `Glu/GABA` for a pair, `Glu/(Glu+GABA+Gln)` for a summed denominator, or
+   `(Glu+GABA)/Gln` for a summed numerator (do not put spaces inside an
+   expression). `Glu/SUMOFMETABOLITES` remains available
+   when the base maps are explicitly listed. A ratio can be entered alone; VLAD
+   discovers its source maps. Nonfinite values and zero denominators are
+   excluded, and a ratio's subject mask is the intersection of its components'
+   quality masks.
 
-   **Gauge-correct selected metabolite and ratio maps before testing** is located
-   directly below this field. It computes every selected output's across-subject
-   group mean, spatially z-scores those means, averages the z maps into a shared
-   voxelwise gauge term, and subtracts that term scaled by each output's spatial
-   standard deviation from every subject map. Original zero voxels remain zero.
-   At least two outputs are required. Raw stacks, `gauge_term.nii.gz`, per-output
-   group means/z maps and a JSON audit are retained with the corrected testing
-   inputs.
+   Gauge-corrected maps use a `z` prefix: `z_Glu` selects the gauge-corrected
+   Glu map, and `zGlu-zGABA` tests the difference between corrected Glu and GABA
+   maps. Include each component map too, as raw entries or `z` entries, for
+   example `z_Glu z_GABA zGlu-zGABA`, and enable **Gauge correction for z maps
+   and contrasts**. Plain `Glu` and ratios
+   still use their raw maps when this option is enabled. Gauge correction
+   requires at least two selected map outputs. Raw stacks, `gauge_term.nii.gz`,
+   per-map group means/z maps and a JSON audit are retained alongside corrected
+   testing inputs.
 
    Use **+ Add filter** to stack categorical
    or numeric covariate rules; active filters combine with AND and can be removed

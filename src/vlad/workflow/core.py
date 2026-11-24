@@ -19,11 +19,12 @@ SUM_OF_METABOLITES = 'SUMOFMETABOLITES'
 
 
 def parse_analytes(values) -> dict:
-    """Parse base metabolites and optional ``numerator/denominator`` analyses."""
+    """Parse raw maps, voxelwise ratios, and gauge-corrected map contrasts."""
     tokens = [str(value).strip().removeprefix('met-') for value in values if str(value).strip()]
     if not tokens or len(tokens) != len(set(tokens)):
         raise ValueError('Specify distinct metabolite or ratio labels.')
-    explicit = [token for token in tokens if '/' not in token]
+    gauge_token = re.compile(r'^z_?[A-Z].*(?:[+-]z?[A-Z].*)?$')
+    explicit = [token for token in tokens if '/' not in token and not gauge_token.fullmatch(token)]
     if any(not METABOLITE_LABEL.fullmatch(token) for token in explicit):
         raise ValueError('Metabolite labels may contain letters, digits, dots, pluses and dashes.')
     sources = list(explicit)
@@ -31,36 +32,77 @@ def parse_analytes(values) -> dict:
                  'numerator': token, 'denominator': [], 'components': [token]}
                 for token in explicit]
     for token in tokens:
-        if '/' not in token:
-            continue
-        if token.count('/') != 1:
-            raise ValueError(f'Invalid ratio {token!r}; use exactly numerator/denominator.')
-        numerator, denominator = (part.strip().removeprefix('met-') for part in token.split('/'))
-        if not METABOLITE_LABEL.fullmatch(numerator):
-            raise ValueError(f'Invalid ratio numerator: {numerator!r}.')
-        is_sum = denominator.upper() == SUM_OF_METABOLITES
-        if not is_sum and not METABOLITE_LABEL.fullmatch(denominator):
-            raise ValueError(f'Invalid ratio denominator: {denominator!r}.')
-        if is_sum:
-            if numerator not in explicit or len(explicit) < 2:
-                raise ValueError(
-                    f'{numerator}/{SUM_OF_METABOLITES} requires the numerator and at least '
-                    'one other base metabolite to be explicitly selected.')
-            denominator_components = list(explicit)
-            canonical_denominator = SUM_OF_METABOLITES
-        else:
-            if numerator == denominator:
+        if '/' in token:
+            if token.count('/') != 1:
+                raise ValueError(f'Invalid ratio {token!r}; use numerator/denominator or numerator/(map+map).')
+            numerator_expression, denominator = (part.strip().strip('()')
+                                                  for part in token.split('/'))
+            numerator_components = [part.strip().removeprefix('met-')
+                                    for part in numerator_expression.split('+')]
+            if not numerator_components or any(not METABOLITE_LABEL.fullmatch(part)
+                                               for part in numerator_components):
+                raise ValueError(f'Invalid ratio numerator: {numerator_expression!r}.')
+            numerator = numerator_components[0]
+            if denominator.upper() == SUM_OF_METABOLITES:
+                if numerator not in explicit or len(explicit) < 2:
+                    raise ValueError(f'{numerator}/{SUM_OF_METABOLITES} requires the numerator and at least one other base metabolite to be explicitly selected.')
+                denominator_components = list(explicit)
+            else:
+                denominator_components = [part.strip().removeprefix('met-') for part in denominator.split('+')]
+                if not denominator_components or any(not METABOLITE_LABEL.fullmatch(part) for part in denominator_components):
+                    raise ValueError(f'Invalid ratio denominator: {denominator!r}. Use a metabolite sum such as (Glu+GABA).')
+            if (len(numerator_components) == len(denominator_components) == 1 and
+                    numerator == denominator_components[0]):
                 raise ValueError(f'Ratio {token!r} has the same numerator and denominator.')
-            denominator_components = [denominator]
-            canonical_denominator = denominator
-            for component in (numerator, denominator):
+            for component in [*numerator_components, *denominator_components]:
                 if component not in sources:
                     sources.append(component)
-        components = list(dict.fromkeys([numerator, *denominator_components]))
-        identifier = f'ratio-{numerator}-over-{canonical_denominator}'
-        analytes.append({'id': identifier, 'label': f'{numerator}/{canonical_denominator}',
-                         'operation': 'ratio', 'numerator': numerator,
-                         'denominator': denominator_components, 'components': components})
+            components = list(dict.fromkeys([*numerator_components, *denominator_components]))
+            numerator_label = '+'.join(numerator_components)
+            denominator_label = (SUM_OF_METABOLITES if denominator.upper() == SUM_OF_METABOLITES
+                                 else '+'.join(denominator_components))
+            identifier = f'ratio-{numerator_label}-over-{denominator_label}'
+            display_denominator = (denominator_label if (len(denominator_components) == 1 or
+                                                         denominator.upper() == SUM_OF_METABOLITES)
+                                   else f'({denominator_label})')
+            item = {'id': identifier, 'label': f'{numerator_label}/{display_denominator}',
+                    'operation': 'ratio', 'numerator': numerator,
+                    'denominator': denominator_components, 'components': components}
+            if len(numerator_components) > 1:
+                item['numerator_components'] = numerator_components
+            analytes.append(item)
+        elif gauge_token.fullmatch(token):
+            # A single z-prefixed term selects a gauge-corrected map; a signed
+            # pair selects a contrast between gauge-corrected maps.
+            expression = token[1:].removeprefix('_')
+            terms = re.split(r'([+-])', expression)
+            names = [part.strip().removeprefix('z').removeprefix('_').removeprefix('met-')
+                     for part in terms[::2]]
+            signs = [1 if sign == '+' else -1 for sign in terms[1::2]]
+            if not names or any(not METABOLITE_LABEL.fullmatch(name) for name in names):
+                raise ValueError(f'Invalid gauge-map expression {token!r}; use z_Glu or zGlu-zGABA.')
+            if len(names) == 1:
+                name = names[0]
+                identifier = f'z-{name}'
+                analytes.append({'id': identifier, 'label': f'z_{name}', 'operation': 'identity',
+                                 'numerator': name, 'denominator': [], 'components': [name],
+                                 'view': 'gauge'})
+            else:
+                if len(signs) != len(names) - 1:
+                    raise ValueError(f'Invalid gauge-map contrast {token!r}.')
+                if len(names) != len(set(names)):
+                    raise ValueError(f'Gauge-map contrast {token!r} repeats a metabolite.')
+                coefficients = [1, *signs]
+                components = list(dict.fromkeys(names))
+                identifier = 'contrast-' + '-'.join(f'{"plus" if c > 0 else "minus"}-{n}'
+                                                       for n, c in zip(names, coefficients))
+                analytes.append({'id': identifier, 'label': token, 'operation': 'contrast',
+                                 'numerator': names[0], 'denominator': names[1:],
+                                 'components': components, 'coefficients': coefficients,
+                                 'view': 'gauge'})
+            for component in names:
+                if component not in sources:
+                    sources.append(component)
     identifiers = [item['id'] for item in analytes]
     if len(identifiers) != len(set(identifiers)):
         raise ValueError('The selected analytes generate duplicate output labels.')

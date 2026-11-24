@@ -118,9 +118,9 @@ def _scan_metabolite_folder(folder):
             'No met- labels were found in NIfTI filenames under this folder'
             + (f' for {active}.' if active else '.'))
         return
-    ratios = [item for item in re.split(r'[,\s]+', st.session_state.get('wf_metabolites', ''))
-              if '/' in item]
-    st.session_state['wf_metabolites'] = ' '.join([*labels, *ratios])
+    derived = [item for item in re.split(r'[,\s]+', st.session_state.get('wf_metabolites', ''))
+               if '/' in item or re.match(r'^z_?[A-Z]', item)]
+    st.session_state['wf_metabolites'] = ' '.join([*labels, *derived])
     st.session_state['wf_metabolite_scan_message'] = (
         f'Found {len(labels)} metabolite label{"s" if len(labels) != 1 else ""} '
         'matching the current space, descriptor and resolution: ' + ', '.join(labels))
@@ -322,7 +322,7 @@ def data_page(state):
         metabolite_field, metabolite_scan = st.columns([3, 1], vertical_alignment='bottom')
         metabolites = metabolite_field.text_input(
             'Metabolites and ratios', key='wf_metabolites',
-            help='Separate entries with spaces or commas. Use Glu/GABA for a voxelwise ratio. Glu/SUMOFMETABOLITES divides by the voxelwise sum of all explicitly selected base metabolites.')
+            help='List raw map labels, ratios and gauge-map contrasts, separated by spaces or commas. Examples: Glu; Glu/GABA; Glu/(Glu+GABA); (Glu+GABA)/Gln; z_Glu; zGlu-zGABA. Ratio expressions must not contain spaces.')
         metabolite_scan.button(
             'Scan folder', disabled=not folder.strip(),
             help='Recursively inspect NIfTI filenames and propose their distinct met- labels. Image data is not opened.',
@@ -331,10 +331,11 @@ def data_page(state):
             st.success(message)
         if error := st.session_state.get('wf_metabolite_scan_error'):
             st.warning(error)
+        st.caption('Plain labels (for example Glu) always test the raw metabolite map. Ratios are computed voxelwise from raw maps. A contrast beginning with z uses gauge-corrected maps; include each component map too, as a raw label or a z-prefixed label (for example: z_Glu z_GABA zGlu-zGABA).')
         gauge = st.checkbox(
-            'Gauge-correct selected metabolite and ratio maps before testing',
+            'Enable gauge correction for z maps and contrasts',
             key='wf_gauge_correction',
-            help='Uses all selected analysis maps to remove the shared voxelwise gauge term. Requires at least two outputs; raw and diagnostic maps are retained.')
+            help='Enables z_Glu and zGlu-zGABA expressions. Plain metabolite labels and ratios continue to use raw maps. Requires at least two selected map outputs; raw and diagnostic maps are retained.')
         a, b = st.columns(2)
         desc = a.text_input('Signal descriptor · desc- (optional)', key='wf_desc')
         resolution = b.text_input('Resolution · res- (optional)', key='wf_resolution')
