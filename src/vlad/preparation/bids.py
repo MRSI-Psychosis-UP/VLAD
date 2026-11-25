@@ -336,8 +336,10 @@ def prepare_inputs(config_file: Path, modality: str, overwrite=False, subjects_f
         raise PreparationError('No scalar input images were selected.')
     source_root = Path(settings.get(f'{prefix}_SOURCE_DIR') or settings[f'NII_DIR_{prefix}']).resolve()
     destination = study / 'prepared' / prefix.lower()
-    if source_root == destination or destination in source_root.parents:
-        raise PreparationError('The original derivatives source must be outside the prepared output folder.')
+    resolved_destination = destination.resolve()
+    if (source_root == resolved_destination or resolved_destination in source_root.parents
+            or source_root in resolved_destination.parents or source_root == study or source_root in study.parents):
+        raise PreparationError('Choose a study and prepared output folder outside the original derivatives source.')
     tags = _list(settings.get(f'{prefix}_EXTRA_TAGS'))
     resolution = str(settings.get(f'{prefix}_RESOLUTION', '')).removeprefix('res-')
     if resolution and not any(tag.startswith('res-') for tag in tags):

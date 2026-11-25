@@ -15,10 +15,12 @@ import streamlit as st
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import filter_rows, load_contrasts, validate_contrasts
 from vlad.gui.file_picker import path_input
+from vlad.gui.templates import _cache_home, tissue_probabilities
 from vlad.workflow.core import (build_model, discover_metabolites, parse_contrast_text,
                                 read_covariates, scan_signals, scan_quality, signature,
-                                validate_population_paths)
+                                validate_output_location, validate_population_paths)
 from vlad.workflow.runner import validate_plan
+from vlad.workflow.tissues import TISSUES, report_tissue_inputs, tissue_mask_paths
 
 STEPS = ['1. Data', '2. Population mask', '3. Model', '4. Contrasts', '5. Randomise settings', '6. Command']
 METRICS = [
@@ -26,10 +28,9 @@ METRICS = [
     {'name': 'fwhm', 'desc': 'fwhm', 'scope': 'Global', 'unit': 'Hz', 'operator': '<', 'threshold': .1},
     {'name': 'crlb', 'desc': 'crlb', 'scope': 'Metabolite', 'unit': 'pc', 'operator': '<', 'threshold': 20.},
 ]
-TRANSIENT_WIDGETS = {'wf_add_filter', 'wf_reset_filter', 'wf_scan_metabolites'}
+TRANSIENT_WIDGETS = {'wf_add_filter', 'wf_reset_filter', 'wf_scan_metabolites', 'wf_gauge_correction'}
 TRANSIENT_PREFIXES = ('wf_remove_filter_', 'wf_table_', 'wf_roles_', 'wf_metrics')
-DATA_WIDGETS = {'wf_covars', 'wf_images', 'wf_space', 'wf_metabolites', 'wf_desc',
-                'wf_resolution', 'wf_gauge_correction'}
+DATA_WIDGETS = {'wf_covars', 'wf_images', 'wf_space', 'wf_metabolites', 'wf_desc', 'wf_resolution'}
 
 
 def _transient_widget(key):
@@ -52,8 +53,6 @@ def _capture_data_widgets(state):
         'desc': str(values['wf_desc'] if values['wf_desc'] is not None else previous.get('desc', '')).strip().removeprefix('desc-'),
         'resolution': str(values['wf_resolution'] if values['wf_resolution'] is not None
                           else previous.get('resolution', '')).strip().removeprefix('res-'),
-        'gauge_correction': bool(values['wf_gauge_correction'] if values['wf_gauge_correction'] is not None
-                                 else previous.get('gauge_correction', False)),
     }
 
 
@@ -87,7 +86,6 @@ def _restore_data_widgets(state):
         'wf_metabolites': ' '.join(configured('metabolites', ['NAA', 'CrPCr'])),
         'wf_desc': configured('desc', 'signal'),
         'wf_resolution': configured('resolution', ''),
-        'wf_gauge_correction': bool(current.get('gauge_correction', False)),
     }
     for key, value in values.items():
         st.session_state[key] = value
@@ -313,7 +311,6 @@ def data_page(state):
         'wf_metabolites': ' '.join(state.get('data', {}).get('metabolites', ['NAA', 'CrPCr'])),
         'wf_desc': state.get('data', {}).get('desc', 'signal'),
         'wf_resolution': state.get('data', {}).get('resolution', ''),
-        'wf_gauge_correction': bool(state.get('data', {}).get('gauge_correction', False)),
     }
     for key, value in data_defaults.items():
         st.session_state.setdefault(key, value)
@@ -331,19 +328,14 @@ def data_page(state):
             st.success(message)
         if error := st.session_state.get('wf_metabolite_scan_error'):
             st.warning(error)
-        st.caption('Plain labels (for example Glu) always test the raw metabolite map. Ratios are computed voxelwise from raw maps. A contrast beginning with z uses gauge-corrected maps; include each component map too, as a raw label or a z-prefixed label (for example: z_Glu z_GABA zGlu-zGABA).')
-        gauge = st.checkbox(
-            'Enable gauge correction for z maps and contrasts',
-            key='wf_gauge_correction',
-            help='Enables z_Glu and zGlu-zGABA expressions. Plain metabolite labels and ratios continue to use raw maps. Requires at least two selected map outputs; raw and diagnostic maps are retained.')
+        st.caption('Use Glu for the raw map and z_Glu for gauge correction. Include at least two distinct input maps, for example z_Glu GABA. For a gauge-map difference, include its component maps too, for example z_Glu z_GABA zGlu-zGABA.')
         a, b = st.columns(2)
         desc = a.text_input('Signal descriptor · desc- (optional)', key='wf_desc')
         resolution = b.text_input('Resolution · res- (optional)', key='wf_resolution')
     state['covars_path_current'] = str(Path(table_path).expanduser().resolve()) if table_path.strip() else ''
     state['data'] = {'folder': folder.strip(), 'space': space.strip().removeprefix('space-'),
                      'metabolites': [item.removeprefix('met-') for item in re.split(r'[,\s]+', metabolites.strip()) if item],
-                     'desc': desc.strip().removeprefix('desc-'), 'resolution': resolution.strip().removeprefix('res-'),
-                     'gauge_correction': gauge}
+                     'desc': desc.strip().removeprefix('desc-'), 'resolution': resolution.strip().removeprefix('res-')}
     if 'frame' not in state:
         st.info('Load the covariates TSV to display the subject/session table.')
         return
@@ -404,6 +396,30 @@ def mask_page(state):
             with st.spinner('Matching quality-map paths…'):
                 state['quality'] = scan_quality(_quality_selection(mask), signals)
         if not _quality(state): st.info('Load quality paths to check the metric filenames. Changing folder, space, resolution or metric scope requires a new check.')
+    with st.expander('Tissue masks for report histograms', expanded=True):
+        space = state['data']['space']
+        st.caption('VLAD uses cached TemplateFlow tissue maps for the analysis space. To override them, provide both non-overlapping binary masks in the same space.')
+        if st.button('Download TemplateFlow GM and WM'):
+            try:
+                validate_output_location(state, _cache_home())
+                with st.spinner(f'Downloading tissue maps for {space}…'):
+                    tissue_probabilities(space, download=True)
+            except (OSError, RuntimeError, ValueError) as exc:
+                st.warning(str(exc))
+        cached = tissue_probabilities(space)
+        paths, status_columns = {}, {}
+        for tissue, label in TISSUES.items():
+            if tissue in cached:
+                field, status_columns[tissue] = st.columns([4, 1], vertical_alignment='bottom')
+            else:
+                field = st.container()
+            with field:
+                paths[tissue] = path_input(f'{label} mask', key=f'wf_tissue_{tissue}',
+                                           extensions=('.nii', '.nii.gz')).strip()
+        state['tissue_masks'] = paths
+        if not any(paths.values()):
+            for status in status_columns.values():
+                status.caption('✅ TemplateFlow cache')
     _table(state, quality=True)
 
 
@@ -456,6 +472,8 @@ def model_page(state):
             'Type': ('Numeric' if pd.to_numeric(state['frame'][name], errors='coerce').notna().all()
                      and state['frame'][name].nunique(dropna=True) > 2 else 'Categorical'),
             'Confound': False, 'Regressor': name == default, 'Reference': ''} for name in measured]
+    for row in state['roles']:
+        row.setdefault('Z-score', False)
     revision = state.get('roles_editor_revision', 0)
     roles = st.data_editor(
         pd.DataFrame(state['roles']), hide_index=True, width='stretch',
@@ -464,6 +482,8 @@ def model_page(state):
             'Include': st.column_config.CheckboxColumn('Include'),
             'Confound': st.column_config.CheckboxColumn('Confound'),
             'Regressor': st.column_config.CheckboxColumn('Regressor'),
+            'Z-score': st.column_config.CheckboxColumn(
+                'Z-score', help='For numeric confounds or regressors, subtract the mean and divide by the standard deviation of the included rows.'),
             'Type': st.column_config.SelectboxColumn(
                 'Type', options=['Numeric', 'Categorical'], required=True),
         })
@@ -477,7 +497,9 @@ def model_page(state):
             if levels:
                 row['Reference'] = st.selectbox('Reference category · ' + row['Name'], levels,
                                                key='wf_reference_' + row['Name'])
-    state['centre'] = st.checkbox('Centre numeric confounds', value=True, key='wf_centre')
+    st.session_state.setdefault('wf_centre', state.get('centre', True))
+    state['centre'] = st.checkbox('Centre numeric confounds', key='wf_centre',
+                                  help='Applies to numeric confounds without z-scoring.')
     try:
         model = _model(state)
     except (ValueError, TypeError) as exc:
@@ -555,7 +577,6 @@ def settings_page(state):
         connectivity = e.selectbox('Connectivity', [6, 26], key='wf_tfce_c')
     state['randomise'] = {'permutations': int(nperm), 'nproc': int(nproc),
                           'tfce': tfce, 'voxelwise': voxelwise, 'uncorrected': uncorr,
-                          'gauge_correction': bool(state.get('data', {}).get('gauge_correction', False)),
                           'variance_smoothing': float(smoothing), 'seed': int(seed), 'tfce_h': float(h), 'tfce_e': float(extent),
                           'tfce_c': connectivity, 'block_column': blocks_column}
     st.caption('The model includes an intercept. Image/mask preparation and optional gauge correction are sequential to limit memory and disk pressure; Randomise then runs up to nproc metabolites concurrently. Contrasts within one metabolite remain sequential.')
@@ -592,7 +613,7 @@ def compile_plan(state, output):
         rows.append({'visit': visit, 'images': row['images'], 'quality': indexed_quality.get(visit, {}).get('quality', {})})
     options = dict(state.get('randomise', {}))
     if not options: raise ValueError('Review Randomise settings first.')
-    options['gauge_correction'] = bool(state.get('data', {}).get('gauge_correction', False))
+    options['gauge_correction'] = any(item.get('view') == 'gauge' for item in signals['analytes'])
     column = options.pop('block_column', 'None')
     if column != 'None':
         values = _selection(state)['frame'][column].astype(str)
@@ -605,6 +626,10 @@ def compile_plan(state, output):
                      source_metabolites=signals['source_metabolites'])
     plan = {'version': 1, 'output_dir': str(output), 'data': plan_data, 'mask': mask, 'rows': rows, 'model': model,
             'randomise': options, 'covariates_source': state['covars_path']}
+    if tissue_masks := tissue_mask_paths(state.get('tissue_masks', {}), plan_data['space']):
+        plan['tissue_masks'] = tissue_masks
+    elif cached := tissue_probabilities(plan_data['space']):
+        plan['tissue_probabilities'] = cached
     sources = validate_plan(plan)
     plan['sources'] = {path: [Path(path).stat().st_size, Path(path).stat().st_mtime_ns] for path in sources}
     return plan
@@ -618,6 +643,7 @@ def _command_model_summary(plan):
         'Role': 'Regressor' if row.get('Regressor') else 'Confound',
         'Type': row['Type'],
         'Reference': row.get('Reference', '') if row['Type'] == 'Categorical' else '',
+        'Z-score': bool(row.get('Z-score', False)),
     } for row in roles]
     frame = pd.DataFrame(plan['model'].get('covariates', []))
     regressor = next((row for row in roles if row.get('Regressor')), None)
@@ -664,6 +690,9 @@ def run_page(state):
             if output.exists():
                 raise ValueError('This run folder already exists. Choose a new run name to keep results intact.')
             plan = compile_plan(state, output)
+            validate_output_location(plan, study_root / 'plans')
+            if not report_tissue_inputs(plan)[0]:
+                st.warning('In Population mask, download matching TemplateFlow tissue maps or choose GM and WM mask files to include histograms.')
             study_root.mkdir(parents=True, exist_ok=True)
             (study_root / 'runs').mkdir(exist_ok=True)
             plan_path = study_root / 'plans' / (run_name + '-' + signature(plan)[:12] + '.json')

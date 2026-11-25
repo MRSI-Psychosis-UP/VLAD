@@ -22,8 +22,7 @@ The installer:
 - installs the browser command generator and Python reporting dependencies;
 - checks Bash, Tk, Zenity and the required system libraries;
 - reuses an existing FSL installation or installs FSL with Randomise and SwE;
-- preserves existing VLAD cohort configurations and working FSL installations;
-- does not modify shell profile files.
+- preserves existing VLAD cohort configurations and working FSL installations.
 
 On Debian/Ubuntu or macOS, missing system packages can be installed through
 `apt` or Homebrew. Administrator authentication may be requested. FSL is a
@@ -49,9 +48,31 @@ preparation tools:
 ./vlad doctor --profile reports
 ```
 
-Native installation supports Linux and macOS. On Windows, use a supported Linux
-or WSL environment. A container setup is documented in
-[docker/README.md](docker/README.md).
+### Make `vlad` available from any directory
+
+On Linux, macOS or inside WSL, the standard installation puts `vlad` on
+your user PATH:
+
+```bash
+./install.sh
+```
+
+The installer creates `~/.local/bin/vlad` and configures your shell's PATH.
+Open a new terminal and run `vlad --help`. For an isolated install, use
+`./install.sh --no-add-to-path`.
+
+On Windows with [WSL and a Linux distribution installed](https://learn.microsoft.com/en-us/windows/wsl/install),
+run this from PowerShell in the VLAD checkout. The checkout can be in the
+Linux filesystem, accessible from Windows under `\\wsl.localhost\<distribution>\`.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\install-windows.ps1
+```
+
+The Windows launcher runs VLAD in WSL. After installation, `vlad` also works
+from PowerShell and Command Prompt. Use WSL paths for data arguments, for
+example `/mnt/c/data`. Pass `-NoAddToPath` to skip PATH setup. A container setup
+is documented in [docker/README.md](docker/README.md).
 
 ## 2. Generate and run a VLAD command
 
@@ -88,15 +109,18 @@ The command generator has six steps:
    choose the MRSI derivative folder, and match `space-`, `met-`, optional
    `desc-`, and optional `res-` filename entities. Rows can be filtered or
    explicitly excluded. Metabolite entries may include voxelwise ratios such as
-   `Glu/GABA` and `Glu/SUMOFMETABOLITES`. Optional gauge correction is configured
-   here.
+   `Glu/GABA` and `Glu/SUMOFMETABOLITES`. A `z_` prefix requests gauge
+   correction. For example, `z_Glu GABA` tests corrected Glu and raw GABA.
 2. **Population mask** — use one precomputed binary mask per metabolite/ratio or
    build population masks from matching quality maps. The defaults are CRLB
    `<20`, FWHM `<0.1` and SNR `>10`, with 68% population coverage.
+   For tissue histograms, use the cached TemplateFlow maps for the matching
+   space, download them in this step, or supply matching binary GM and WM masks.
 3. **Model** — retain the covariate table layout and select `Include`, `Confound`
    or `Regressor` with checkboxes. A covariate cannot be both a confound and a
    regressor: selecting either role clears the other. Exactly one tested
-   regressor is required.
+   regressor is required. Tick `Z-score` for any numeric confound or regressor
+   to standardize it across the included observations.
 4. **Contrasts** — review the exact design-column order. Both suggested
    directions are selected by default; keep either one or both, enter custom
    weights, or load a contrast file.
@@ -117,7 +141,8 @@ Copy the generated command and run it in a terminal. It has this form:
 ```
 
 The workflow creates `/study/runs/MyRun/` only when that command executes. It
-refuses to overwrite an existing run folder.
+refuses to overwrite an existing run folder. Choose an output folder outside
+the source derivative trees.
 
 ### Generated outputs
 
@@ -146,8 +171,12 @@ runs/<run-name>/
 
 When gauge correction is enabled, raw stacks, the shared `gauge_term.nii.gz`,
 per-map group means, z maps and audit metadata are also retained. The HTML report
-contains anatomical slice mosaics, connected-cluster tables and descriptive
-subject-level plots for significant corrected maps.
+contains up to eight slices in each anatomical plane, connected-cluster tables
+and descriptive subject-level plots for significant corrected maps. With
+matching GM and WM maps, a histogram below the slices shows the raw
+t-statistic at each voxel that passes the corrected p-value threshold. The
+subject-level plot summarizes each included subject/session's mean signal
+across those significant voxels.
 
 To prepare matrices, 4D stacks and masks without running Randomise:
 
@@ -161,6 +190,10 @@ permutations:
 ```bash
 ./vlad workflow --plan /study/runs/MyRun/plan.json --report-only
 ```
+
+To add tissue histograms to an existing report, pass both
+`--gm-mask /path/to/gm.nii.gz` and `--wm-mask /path/to/wm.nii.gz` with
+`--report-only`.
 
 The full browser workflow, matching rules, mask construction and report layout
 are described in [docs/browser-gui.md](docs/browser-gui.md).
@@ -250,6 +283,8 @@ shell argument, normally enclosed in single quotes.
 | `--skip-system` | Off | Do not install missing system packages. |
 | `--skip-fsl` | Off | Do not download FSL; a full installation still validates it. |
 | `--no-check` | Off | Skip final dependency checks, leaving the installation unverified. |
+| `--add-to-path` | On | Install a user launcher and configure PATH for future shells. |
+| `--no-add-to-path` | Off | Skip user launcher and shell PATH setup. |
 | `--yes` | Off | Use noninteractive package-manager/bootstrap operation. |
 
 ### Global, GUI, doctor and guided-workflow arguments
@@ -268,6 +303,8 @@ shell argument, normally enclosed in single quotes.
 | `vlad workflow` | `--plan PATH` | Required | Immutable JSON plan generated by VLAD. |
 | `vlad workflow` | `--prepare-only` | Off | Create designs, stacks and masks without Randomise. |
 | `vlad workflow` | `--report-only` | Off | Regenerate the report for the plan's existing completed run; incompatible with `--prepare-only`. |
+| `vlad workflow` | `--gm-mask PATH` | Plan setting | Binary gray matter NIfTI. Supply with `--wm-mask` and `--report-only`. |
+| `vlad workflow` | `--wm-mask PATH` | Plan setting | Binary white matter NIfTI. Supply with `--gm-mask` and `--report-only`. |
 
 ### `vlad configure` arguments
 

@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import nibabel as nib
+import numpy as np
 import pandas as pd
 import streamlit as st
 from streamlit.testing.v1 import AppTest
@@ -78,14 +80,36 @@ class GuidedInterfaceTests(GuidedFixture):
     def test_ratio_and_gauge_inputs_live_on_data_and_persist(self):
         app = self.app(); self.healthy(app)
         app.text_input(key='wf_metabolites').set_value(
-            'Glu GABA Glu/GABA Glu/SUMOFMETABOLITES').run()
-        app.checkbox(key='wf_gauge_correction').set_value(True).run()
+            'Glu GABA z_Glu Glu/GABA Glu/SUMOFMETABOLITES').run()
+        self.assertFalse(any(item.key == 'wf_gauge_correction' for item in app.checkbox))
         self.page(app, 4)
         self.assertFalse(any(item.key == 'wf_gauge_correction' for item in app.checkbox))
         self.page(app, 0)
         self.assertEqual(app.text_input(key='wf_metabolites').value,
-                         'Glu GABA Glu/GABA Glu/SUMOFMETABOLITES')
-        self.assertTrue(app.checkbox(key='wf_gauge_correction').value)
+                         'Glu GABA z_Glu Glu/GABA Glu/SUMOFMETABOLITES')
+        self.assertFalse(any(item.key == 'wf_gauge_correction' for item in app.checkbox))
+
+    def test_tissue_fields_show_cached_source_after_download(self):
+        cached = {}
+
+        def template_maps(space, *, download=False):
+            self.assertEqual(space, 'MNI')
+            if download:
+                cached.update(gm='/cache/gm.nii.gz', wm='/cache/wm.nii.gz')
+            return cached
+
+        with patch('vlad.gui.wizard.tissue_probabilities', side_effect=template_maps):
+            app = self.app()
+            self.load_data(app)
+            self.page(app, 1)
+            self.assertFalse(any('✅ TemplateFlow cache' in item.value for item in app.caption))
+            self.click(app, 'Download TemplateFlow GM and WM')
+            self.assertEqual(sum(item.value == '✅ TemplateFlow cache' for item in app.caption), 2)
+            self.assertEqual(app.text_input(key='wf_tissue_gm').value, '')
+            self.assertEqual(app.text_input(key='wf_tissue_wm').value, '')
+            app.text_input(key='wf_tissue_gm').set_value('/custom/gm.nii.gz').run()
+            self.healthy(app)
+            self.assertFalse(any('✅ TemplateFlow cache' in item.value for item in app.caption))
 
     def test_default_workflow_has_six_steps_and_preserves_inputs_across_pages(self):
         app = self.app(); self.healthy(app)
@@ -94,6 +118,13 @@ class GuidedInterfaceTests(GuidedFixture):
         self.page(app, 1)
         self.assertFalse(app.latex)
         self.assertFalse(any('pc = percent' in item.value for item in app.caption))
+        gm, wm = self.base / 'gm.nii.gz', self.base / 'wm.nii.gz'
+        tissue = np.zeros((2, 2, 2), dtype=np.uint8)
+        tissue[0] = 1
+        nib.save(nib.Nifti1Image(tissue, np.eye(4)), gm)
+        nib.save(nib.Nifti1Image(1 - tissue, np.eye(4)), wm)
+        app.text_input(key='wf_tissue_gm').set_value(str(gm))
+        app.text_input(key='wf_tissue_wm').set_value(str(wm)).run()
         self.click(app, 'Load quality paths')
         self.page(app, 2)
         self.assertTrue(any('full rank' in item.value for item in app.success))
@@ -101,6 +132,14 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertIn('Include', role_columns)
         self.assertIn('Confound', role_columns)
         self.assertIn('Regressor', role_columns)
+        self.assertIn('Z-score', role_columns)
+        workflow = app.session_state['guided_workflow']
+        editor_key = f'wf_roles_{workflow["table_id"][:12]}_{workflow.get("roles_editor_revision", 0)}'
+        app.session_state[editor_key] = {
+            'edited_rows': {0: {'Z-score': True}}, 'added_rows': [], 'deleted_rows': []}
+        app.run()
+        self.healthy(app)
+        self.assertTrue(app.session_state['guided_workflow']['roles'][0]['Z-score'])
         self.page(app, 3)
         selector = next(item for item in app.multiselect if item.label == 'Contrasts to test')
         self.assertEqual(len(selector.options), 2)
@@ -137,6 +176,9 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertEqual(plan['randomise']['nproc'], 4)
         self.assertFalse(plan['randomise']['gauge_correction'])
         self.assertEqual(plan['model']['subjects'], self.visits)
+        self.assertEqual(plan['model']['coding']['Age']['transform'], 'z-score')
+        self.assertEqual(plan['tissue_masks'], {'gm': str(gm), 'wm': str(wm)})
+        self.assertTrue({str(gm), str(wm)} <= plan['sources'].keys())
         self.assertEqual(plan['mask']['metrics'][1]['threshold'], .1)
         self.assertEqual(plan['mask']['metrics'][1]['unit'], 'Hz')
         self.assertEqual(len(plan['rows']), 8)

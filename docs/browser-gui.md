@@ -47,10 +47,10 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    Gauge-corrected maps use a `z` prefix: `z_Glu` selects the gauge-corrected
    Glu map, and `zGlu-zGABA` tests the difference between corrected Glu and GABA
    maps. Include each component map too, as raw entries or `z` entries, for
-   example `z_Glu z_GABA zGlu-zGABA`, and enable **Gauge correction for z maps
-   and contrasts**. Plain `Glu` and ratios
-   still use their raw maps when this option is enabled. Gauge correction
-   requires at least two selected map outputs. Raw stacks, `gauge_term.nii.gz`,
+   example `z_Glu z_GABA zGlu-zGABA`. The prefix activates gauge correction
+   automatically. Plain `Glu` and ratios use raw values. Gauge correction
+   requires at least two distinct maps, for example `z_Glu GABA`.
+   Raw stacks, `gauge_term.nii.gz`,
    per-map group means/z maps and a JSON audit are retained alongside corrected
    testing inputs.
 
@@ -69,11 +69,21 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    subject, all criteria must pass. The population mask retains a voxel when
    at least the chosen percentage of the **final included subjects** passes.
    Supplied population masks are used directly, after binary/grid validation.
+   Under **Tissue masks for report histograms**, download TemplateFlow's GM and
+   WM probability maps for the exact analysis space. VLAD reuses them from its
+   local `.cache/templateflow` directory or `TEMPLATEFLOW_HOME`. A voxel is
+   assigned to the more probable of GM and WM when its probability is at least
+   0.5. To override the atlas, choose both non-overlapping binary NIfTIs
+   already registered to the analysis space. VLAD samples the masks onto the
+   analysis grid with nearest-neighbour interpolation.
 3. **Model** — use the Include, Confound and Regressor checkboxes for every
    covariate, with explicit categorical reference levels. Choose one tested
    regressor and any confounds. Checking Confound automatically clears
    Regressor for that variable, and checking Regressor clears Confound, so a
    covariate can never have both roles.
+   Tick **Z-score** on a numeric confound or regressor to subtract the mean and
+   divide by the population standard deviation of the included observations.
+   Standardization is recorded in the plan and leaves the source TSV intact.
    The exact matrix order is intercept, confounds, then regressor columns.
    Missing values and rank-deficient models require explicit correction or
    exclusion; model construction never silently drops rows.
@@ -113,7 +123,14 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
 The headless equivalent is `./vlad workflow --plan /path/to/plan.json`; add
 `--prepare-only` to build matrices, stacks and masks without running Randomise.
 Use `--report-only` to regenerate the visual report for an existing completed
-run without repeating permutations.
+run without repeating permutations. Add `--gm-mask /path/to/gm.nii.gz` and
+`--wm-mask /path/to/wm.nii.gz` together to supply tissue masks for that report.
+Each corrected map with significant voxels gets up to eight slices in each
+anatomical plane. Beneath the slices, the GM/WM histogram shows the raw
+t-statistics for voxels with corrected p ≤ 0.05 in that result. The two
+tissues share bins, with heights shown as percentages within each tissue.
+The subject-level plot shows one point per included subject/session, averaged
+across the same significant voxels.
 Each run writes a new `runs/<name>` folder and refuses to replace an existing
 one. Its plan records model columns, contrasts, selected-row order, exclusion
 audit, quality units/criteria, original paths and input size/mtime fingerprints.

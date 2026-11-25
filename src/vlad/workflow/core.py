@@ -18,6 +18,16 @@ METABOLITE_LABEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9.+-]*')
 SUM_OF_METABOLITES = 'SUMOFMETABOLITES'
 
 
+def validate_output_location(plan, output):
+    """Keep generated files out of the signal and quality derivative trees."""
+    destination = Path(output).resolve()
+    for source in (plan.get('data', {}), plan.get('mask', {})):
+        if folder := source.get('folder'):
+            input_root = Path(folder).expanduser().resolve()
+            if destination == input_root or input_root in destination.parents:
+                raise ValueError(f'Choose a VLAD output folder outside the input derivative folder {input_root}.')
+
+
 def parse_analytes(values) -> dict:
     """Parse raw maps, voxelwise ratios, and gauge-corrected map contrasts."""
     tokens = [str(value).strip().removeprefix('met-') for value in values if str(value).strip()]
@@ -262,14 +272,23 @@ def build_model(frame: pd.DataFrame, roles: list[dict], centre=True) -> dict:
         raw = frame[name].reset_index(drop=True)
         if raw.isna().any() or raw.astype(str).str.strip().isin(['', 'n/a', 'nan', 'NA']).any():
             raise ValueError(f'{name}: missing values; explicitly exclude those rows in Data.')
+        z_score = bool(row.get('Z-score', False))
+        if z_score and row['Type'] != 'Numeric':
+            raise ValueError(f'{name}: z-scoring is only available for numeric variables.')
         encoded = {}
         if row['Type'] == 'Numeric':
             values = pd.to_numeric(raw, errors='raise').astype(float)
             if not np.isfinite(values).all() or values.nunique() < 2:
                 raise ValueError(f'{name}: needs finite, varying numeric values.')
-            mean = float(values.mean()) if centre and row['Confound'] else 0.
+            mean = float(values.mean()) if z_score or (centre and row['Confound']) else 0.
             encoded[name] = values - mean
             coding[name] = {'type': 'numeric', 'subtracted_mean': mean}
+            if z_score:
+                scale = float(values.std(ddof=0))
+                if not np.isfinite(scale) or scale <= 0:
+                    raise ValueError(f'{name}: z-scoring needs a finite, nonzero standard deviation.')
+                encoded[name] /= scale
+                coding[name].update(transform='z-score', standard_deviation=scale)
             if row['Regressor']:
                 levels = sorted(values.unique())
                 if len(levels) == 2:

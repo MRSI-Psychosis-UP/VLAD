@@ -106,6 +106,48 @@ def _validate_reference(path: Path) -> Path:
     return path.resolve()
 
 
+def _cached_resource(name):
+    for root in _cache_roots():
+        path = root / name
+        if path.is_file() and path.stat().st_size:
+            return _validate_reference(path)
+    return None
+
+
+def _fetch_resource(template, name):
+    if path := _cached_resource(name):
+        return path
+    cache = _cache_home()
+    env = os.environ.copy()
+    env.update(TEMPLATEFLOW_HOME=str(cache), TEMPLATEFLOW_AUTOUPDATE="false", TEMPLATEFLOW_USE_DATALAD="false")
+    # Use a separate client process so a desktop app's imported global cache cannot
+    # redirect a browser selection into a different cache or DataLad dataset.
+    script = """import json, sys
+from templateflow import TemplateFlowClient
+query = json.loads(sys.argv[2])
+client = TemplateFlowClient(root=sys.argv[1], autoupdate=False, use_datalad=False)
+path = client.get(sys.argv[3], **query)
+print('VLAD_TEMPLATE=' + json.dumps(str(path)))
+"""
+    entity = _entities(name)
+    query = {"suffix": entity["suffix"], "desc": None, "extension": ".nii.gz" if name.endswith(".gz") else ".nii"}
+    for key, field in (("res", "resolution"), ("cohort", "cohort"), ("label", "label")):
+        if key in entity:
+            query[field] = int(entity[key]) if entity[key].isdigit() else entity[key]
+    try:
+        result = subprocess.run([sys.executable, "-c", script, str(cache), json.dumps(query), template],
+                                env=env, capture_output=True, text=True, timeout=180, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"TemplateFlow could not retrieve the image: {exc}") from exc
+    lines = [line[len("VLAD_TEMPLATE="):] for line in result.stdout.splitlines() if line.startswith("VLAD_TEMPLATE=")]
+    if result.returncode or not lines:
+        raise RuntimeError("TemplateFlow could not retrieve the image. Check network access or choose a custom NIfTI path. " + result.stderr[-1500:])
+    path = Path(json.loads(lines[-1]))
+    if not path.is_file() or not path.stat().st_size:
+        raise RuntimeError("TemplateFlow did not return a nonempty NIfTI image.")
+    return _validate_reference(path)
+
+
 def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T1w") -> Path:
     """Fetch one explicitly selected reference; reuse either local cache first."""
     if suffix not in {"T1w", "T2w"}:
@@ -122,36 +164,29 @@ def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T
         candidates.append(name)
     if len(candidates) != 1:
         raise ValueError(f"The selection matches {len(candidates)} anatomical files. Select a specific template resolution and cohort.")
-    for root in _cache_roots():
-        path = root / candidates[0]
-        if path.is_file() and path.stat().st_size:
-            return _validate_reference(path)
-    cache = _cache_home()
-    env = os.environ.copy()
-    env.update(TEMPLATEFLOW_HOME=str(cache), TEMPLATEFLOW_AUTOUPDATE="false", TEMPLATEFLOW_USE_DATALAD="false")
-    # Use a separate client process so a desktop app's imported global cache cannot
-    # redirect a browser selection into a different cache or DataLad dataset.
-    script = """import json, sys
-from templateflow import TemplateFlowClient
-query = json.loads(sys.argv[2])
-client = TemplateFlowClient(root=sys.argv[1], autoupdate=False, use_datalad=False)
-path = client.get(sys.argv[3], **query)
-print('VLAD_TEMPLATE=' + json.dumps(str(path)))
-"""
-    entity = _entities(candidates[0])
-    query = {"suffix": suffix, "desc": None, "extension": ".nii.gz" if candidates[0].endswith(".gz") else ".nii"}
-    for key, name in (("res", "resolution"), ("cohort", "cohort")):
-        if key in entity:
-            query[name] = int(entity[key]) if entity[key].isdigit() else entity[key]
-    try:
-        result = subprocess.run([sys.executable, "-c", script, str(cache), json.dumps(query), template],
-                                env=env, capture_output=True, text=True, timeout=180, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"TemplateFlow could not retrieve the reference: {exc}") from exc
-    lines = [line[len("VLAD_TEMPLATE="):] for line in result.stdout.splitlines() if line.startswith("VLAD_TEMPLATE=")]
-    if result.returncode or not lines:
-        raise RuntimeError("TemplateFlow could not retrieve the reference. Check network access or choose a custom NIfTI path. " + result.stderr[-1500:])
-    path = Path(json.loads(lines[-1]))
-    if not path.is_file() or not path.stat().st_size:
-        raise RuntimeError("TemplateFlow did not return a nonempty anatomical image.")
-    return _validate_reference(path)
+    return _fetch_resource(template, candidates[0])
+
+
+def tissue_probabilities(template: str, *, download=False) -> dict:
+    """Find exact-space, cohort-independent GM and WM probability maps."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", template):
+        return {}
+    pairs = {}
+    prefix = f"tpl-{template}/tpl-{template}_"
+    for name in _bundled_catalogue()[0]:
+        if not name.startswith(prefix):
+            continue
+        fields = _entities(name)
+        if (fields["suffix"] == "probseg" and fields.get("label") in {"GM", "WM"}
+                and fields.keys() <= {"tpl", "res", "label", "suffix"}):
+            pairs.setdefault(fields.get("res", ""), {})[fields["label"].lower()] = name
+    for _, pair in sorted(pairs.items()):
+        if len(pair) == 2:
+            if download:
+                return {key: str(_fetch_resource(template, pair[key])) for key in ("gm", "wm")}
+            cached = {key: _cached_resource(pair[key]) for key in ("gm", "wm")}
+            if all(cached.values()):
+                return {key: str(path) for key, path in cached.items()}
+    if download:
+        raise ValueError(f"TemplateFlow has no matching GM/WM probability pair for {template}. Choose custom masks for this space.")
+    return {}

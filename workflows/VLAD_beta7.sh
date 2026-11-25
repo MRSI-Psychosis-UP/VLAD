@@ -927,6 +927,10 @@ mrsi)
     source config_mrsi.sh
     # Making the values
     nii_cards=${NII_DIR_MRSI}
+    mrsi_source="${MRSI_SOURCE_DIR:-$nii_cards}"
+    for output_dir in "$GLOBAL_DIR" "$GLOBAL_DIR/Results" "$GLOBAL_DIR/Cartes4D" "$GLOBAL_DIR/Listes" "${DIR_RANALYSES:-$GLOBAL_DIR}"; do
+        vlad_require_separate_output "$output_dir" "$mrsi_source" || exit 1
+    done
     nii_cards_orga=${NII_DIR_MRSI_orga}
     if [[ ${NII_DIR_MRSI_compression} == "yes" || ${NII_DIR_MRSI_compression} == "y" ]]; then
         COMPRESSION=".gz"
@@ -1918,6 +1922,16 @@ get_active_dti_analysis_mask() {
     resolve_dti_analysis_mask
 }
 
+find_mrsi_analysis_input() {
+    local filename="$1" sub="$2" visit="$3"
+    local derived="${GLOBAL_DIR}/Results/prepared-mrsi/sub-${sub}/ses-${visit}/${filename}"
+    if [[ "${MRSI_INPUT_MODE:-legacy}" != bids && -f "$derived" ]]; then
+        printf '%s\n' "$derived"
+    else
+        find "${nii_cards}" -type f -name "$filename" -print -quit 2>/dev/null
+    fi
+}
+
 wrap4dcards() { # This needs to be more flexible...
 
     TARGET_DIR="${GLOBAL_DIR}/Cartes4D/${NAME}"
@@ -1946,9 +1960,13 @@ wrap4dcards() { # This needs to be more flexible...
             exit 1 # Exit script if the function returns an error
         fi
 
-        cd ${nii_cards}
+        cd "${nii_cards}" || return 1
         FILE_PATH=""
-        FILE_PATH=$(find "${nii_cards}" -type f -name "$file_subject" 2>/dev/null | head -n 1)
+        if [[ ${type_images} == mrsi ]]; then
+            FILE_PATH=$(find_mrsi_analysis_input "$file_subject" "$sub" "$visit")
+        else
+            FILE_PATH=$(find "${nii_cards}" -type f -name "$file_subject" 2>/dev/null | head -n 1)
+        fi
         if [[ -z "$FILE_PATH" ]]; then
             echo "File for $SUBJ not found, exiting to avoid further errors"
             echo "Catching errors : sub : $sub ; visit : $visit ; data_type : $data_type ; acq : $acquisition ; todo : $cardtodo ; compr : $COMPRESSION "
@@ -2049,7 +2067,7 @@ wrapmasksmrsi() {
                 sub=${SUBJ%_*}
                 visit=${SUBJ#*_}
                 file_subject=$(name_subject_file_mrsi "${sub}" "${visit}" "${data_type}" "${MET}" "${qmask_val}" "${COMPRESSION}") || return 1
-                FILE_PATH=$(find "${nii_cards}" -type f -name "$file_subject" 2>/dev/null | head -n 1)
+                FILE_PATH=$(find_mrsi_analysis_input "$file_subject" "$sub" "$visit")
                 if [[ -z "$FILE_PATH" ]]; then
                     echo "QMask file for $SUBJ and $MET not found, exiting to avoid further errors." >&2
                     rm -f "${subject_qmask_files[@]}"
@@ -2313,14 +2331,14 @@ randoanalyze() {
 
                     cd "${nii_cards}" || return 1
                     FILE_PATH_conc=""
-                    FILE_PATH_conc=$(find "${nii_cards}" -type f -name "$file_subject_conc" 2>/dev/null | head -n 1)
+                    FILE_PATH_conc=$(find_mrsi_analysis_input "$file_subject_conc" "$sub" "$visit")
                     if [[ -z "$FILE_PATH_conc" ]]; then
                         echo "File conc for $SUBJ not found, exiting to avoid further errors"
                         return 1
                     fi
 
                     FILE_PATH_qmask=""
-                    FILE_PATH_qmask=$(find "${nii_cards}" -type f -name "$file_subject_qmask" 2>/dev/null | head -n 1)
+                    FILE_PATH_qmask=$(find_mrsi_analysis_input "$file_subject_qmask" "$sub" "$visit")
                     if [[ -z "$FILE_PATH_qmask" ]]; then
                         echo "File qmask for $SUBJ not found, exiting to avoid further errors"
                         return 1

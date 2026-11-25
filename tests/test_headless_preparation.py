@@ -71,6 +71,33 @@ class HeadlessPreparationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("did not pass validation", result.stderr)
 
+    def test_legacy_mrsi_prepares_derived_maps_outside_the_source_tree(self):
+        (self.study / "config_mrsi.sh").write_text(
+            f"NII_DIR_MRSI={shlex.quote(str(self.inputs))}\nNII_DIR_MRSI_compression=yes\n"
+            "MRSI_ANALYSIS_DESCRIPTION=signal\nFILES_MRSI_MET=(signal crlb)\nFILES_MRSI_GLOBAL=(fwhm snr)\n")
+        prefix = "sub-001_ses-V1_space-mni"
+        for label in ("NAANAAG", "CrPCr", "GPCPCh", "Ins", "GluGln"):
+            for metric in ("signal", "crlb"):
+                (self.inputs / f"{prefix}_met-{label}_desc-{metric}_mrsi.nii.gz").write_text("source")
+        for metric in ("fwhm", "snr"):
+            (self.inputs / f"{prefix}_desc-{metric}_mrsi.nii.gz").write_text("source")
+        original = {path.name: path.read_bytes() for path in self.inputs.iterdir()}
+        maths = Path(self.env["FSLDIR"]) / "share/fsl/bin/fslmaths"
+        maths.write_text(
+            '#!/bin/bash\n'
+            '[[ -f "$1" || -f "$1.nii.gz" ]] || exit 1\n'
+            'output="${!#}"\n'
+            '[[ "$output" == *.nii.gz ]] || output="$output.nii.gz"\n'
+            'printf "derived" >"$output"\n')
+        maths.chmod(0o755)
+        result = self.run_prep("--config", str(self.config), "--modality", "MRSI", "--non-interactive")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual({path.name: path.read_bytes() for path in self.inputs.iterdir()}, original)
+        prepared = self.study / "Results/prepared-mrsi/sub-001/ses-V1"
+        self.assertTrue((prepared / f"{prefix}_met-SumMetabs_desc-signal_mrsi.nii.gz").is_file())
+        self.assertTrue((prepared / f"{prefix}_met-CrPCrRatioSum_desc-signal_mrsi.nii.gz").is_file())
+        self.assertTrue((prepared / f"{prefix}_met-CrPCr_desc-QMask_mrsi.nii.gz").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

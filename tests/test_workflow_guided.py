@@ -192,6 +192,33 @@ class GuidedWorkflowTests(GuidedFixture):
         state['roles'][0]['Confound'] = True
         with self.assertRaises(ValueError): build_model(self.frame, state['roles'])
 
+    def test_z_score_uses_selected_rows_and_both_numeric_roles(self):
+        state = self.state()
+        state['frame'] = self.frame.assign(Motion=[.1, .3, .2, .5, .3, .2, .8, .1])
+        state['excluded'] = [0]
+        state['centre'] = False
+        state['roles'][0]['Z-score'] = True
+        state['roles'].append({'Name': 'Motion', 'Type': 'Numeric', 'Include': True,
+                               'Confound': True, 'Regressor': False, 'Z-score': True})
+        selected = state['frame'].iloc[1:]
+        model = build_model(selected, state['roles'], centre=False)
+        with self.assertRaisesRegex(ValueError, 'review and confirm'):
+            compile_plan(state, self.base / 'output')
+        state['contrasts'] = {'identity': _contrast_identity({**model, 'roles': state['roles']}),
+                              'weights': model['contrasts'], 'labels': model['contrast_labels']}
+        plan = compile_plan(state, self.base / 'output')
+        execute(plan, prepare_only=True)
+        design = pd.read_csv(self.base / 'output/design.tsv', sep='\t')
+        for name in ('Age', 'Motion'):
+            numeric = pd.to_numeric(selected[name])
+            mean, std = numeric.mean(), numeric.std(ddof=0)
+            np.testing.assert_allclose(design[name], (numeric - mean) / std)
+            self.assertEqual(plan['model']['coding'][name]['standard_deviation'], std)
+        self.assertEqual(plan['model']['covariates'][0]['Age'], selected.iloc[0]['Age'])
+        state['roles'][1]['Z-score'] = True
+        with self.assertRaisesRegex(ValueError, 'only available for numeric'):
+            build_model(selected, state['roles'])
+
     def test_contrast_labels_explain_categorical_and_binary_numeric_directions(self):
         roles = [
             {'Include': True, 'Name': 'Age', 'Type': 'Numeric', 'Confound': True,
@@ -402,6 +429,23 @@ class GuidedWorkflowTests(GuidedFixture):
         one['randomise']['gauge_correction'] = True
         with self.assertRaisesRegex(ValueError, 'at least two'):
             validate_plan(one)
+
+    def test_gauge_syntax_selects_corrected_stack_and_source_tree_is_read_only(self):
+        state = self.state()
+        state['data'] = {**self.data, 'metabolites': ['z_NAA', 'CrPCr']}
+        state['signals'] = scan_signals(state['data'], self.visits)
+        state['quality'] = scan_quality(state['quality']['config'], state['signals'])
+        with self.assertRaisesRegex(ValueError, 'outside the input derivative folder'):
+            compile_plan(state, self.inputs / 'runs' / 'bad-output')
+        self.assertFalse((self.inputs / 'runs').exists())
+        plan = compile_plan(state, self.base / 'output')
+        self.assertTrue(plan['randomise'].pop('gauge_correction'))
+        execute(plan, prepare_only=True)
+        corrected, raw = (randomise_command(plan, met)[2] for met in ('z-NAA', 'CrPCr'))
+        self.assertTrue(corrected.endswith('/z-NAA/signals.nii.gz'))
+        self.assertTrue(raw.endswith('/CrPCr/signals_raw.nii.gz'))
+        self.assertFalse(np.allclose(nib.load(corrected).get_fdata(),
+                                     nib.load(Path(corrected).with_name('signals_raw.nii.gz')).get_fdata()))
 
 
 if __name__ == '__main__': unittest.main()

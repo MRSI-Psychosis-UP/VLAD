@@ -20,7 +20,7 @@ it if absent; the upstream Homebrew setup may request administrator access or
 Apple command-line tools. Windows users should run the command in a supported
 Linux/WSL environment, or use the [container](../docker/README.md).
 
-Use the application directly, with no activation or shell-profile edits:
+Use the application directly without activating the environment:
 
 ```bash
 ./vlad --help
@@ -29,8 +29,8 @@ Use the application directly, with no activation or shell-profile edits:
 ./vlad prep
 ```
 
-The launcher also works by absolute path from another directory. If you want
-the bare `vlad` command in your own shell, activating `.venv/` remains optional.
+The launcher also works by absolute path from another directory. After a
+standard installation, open a new terminal to use the bare `vlad` command.
 The legacy Bash launchers under `scripts/compat/` load the installed runtime
 too. They accept the same arguments and locate the checkout independently of
 the caller's working directory.
@@ -62,6 +62,7 @@ between cohort settings and prepared imaging data.
 ./install.sh --skip-system                 # system prerequisites already present
 ./install.sh --fsl-dir /path/to/existing/fsl
 ./install.sh --python /path/to/python3.12
+./install.sh --no-add-to-path
 ```
 
 `--skip-fsl` prevents FSL download and still requires a working installation
@@ -69,6 +70,14 @@ for full setup. `--reports-only` skips that requirement. `--no-check` marks the
 result unverified; it never prints a verified-ready message. `--yes` requests
 noninteractive Homebrew bootstrap. The old `scripts/bootstrap.sh` remains an
 entry point to the same installer in reports-only mode.
+
+The installer writes a launcher to `~/.local/bin/vlad` by default and adds the directory
+to future Bash, Zsh, Fish or POSIX login shells. Repeated installations reuse
+the same launcher. On Windows, `.\scripts\install-windows.ps1`
+installs through WSL and also registers a user-level Windows launcher.
+Use `-Distribution` to select a non-default WSL distribution, or omit it
+when the checkout is already under a WSL network path. To skip PATH setup,
+use `--no-add-to-path` on Linux/macOS/WSL or `-NoAddToPath` in PowerShell.
 
 The app uses Python 3.10–3.12, including a Tk check for the full workflow. A
 private Python 3.12 is downloaded when no compatible installed interpreter is

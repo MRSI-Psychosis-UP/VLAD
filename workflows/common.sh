@@ -88,6 +88,20 @@ vlad_resolve_helper_path() {
     fi
 }
 
+vlad_require_separate_output() {
+    local output input ancestor="$1"
+    while [[ ! -d "$ancestor" ]]; do
+        [[ ! -e "$ancestor" && ! -L "$ancestor" ]] || return 1
+        ancestor=$(dirname "$ancestor") || return 1
+    done
+    output=$(cd "$ancestor" && pwd -P) || return 1
+    input=$(cd "$2" && pwd -P) || return 1
+    if [[ "$output" == "$input" || "$output/" == "$input/"* ]]; then
+        printf 'Choose a VLAD output folder outside the input derivative folder %s.\n' "$input" >&2
+        return 1
+    fi
+}
+
 # Keep the plotting cache with a writable checkout; respect explicit settings.
 if [[ -z "${MPLCONFIGDIR:-}" ]] && mkdir -p "${VLAD_HOME}/.cache/matplotlib" 2>/dev/null; then
     export MPLCONFIGDIR="${VLAD_HOME}/.cache/matplotlib"

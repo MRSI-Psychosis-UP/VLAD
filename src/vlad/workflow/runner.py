@@ -22,8 +22,9 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import _vest, validate_contrasts
-from vlad.workflow.core import validate_population_paths
+from vlad.workflow.core import validate_output_location, validate_population_paths
 from vlad.workflow.gauge import correct_map_voxelwise, gauge_from_group_means
+from vlad.workflow.tissues import align_tissue_masks, report_tissue_inputs
 
 
 PROGRESS_PREFIX = 'VLAD_PROGRESS '
@@ -136,12 +137,27 @@ def _emit_progress(metabolite, stage, current, total=None, detail=''):
     _emit(PROGRESS_PREFIX + json.dumps(event, separators=(',', ':')))
 
 
+def _gauge_enabled(plan):
+    # Explicit true remains valid for previously saved plans.
+    return plan['randomise'].get('gauge_correction', False) or any(
+        item.get('view') == 'gauge' for item in _analytes(plan))
+
+
+def _gauge_key(analyte):
+    return (tuple(analyte['components']) if analyte['operation'] == 'identity'
+            else analyte['id'])
+
+
+def _analysis_stack_name(plan, metabolite):
+    if _gauge_enabled(plan) and _analyte(plan, metabolite).get('view', 'raw') == 'raw':
+        return 'signals_raw.nii.gz'
+    return 'signals.nii.gz'
+
+
 def randomise_command(plan, metabolite, executable='randomise'):
     directory = Path(plan['output_dir']) / metabolite
     settings = plan['randomise']
-    analyte = _analyte(plan, metabolite)
-    input_stack = ('signals_raw.nii.gz' if settings.get('gauge_correction') and
-                   analyte.get('view', 'raw') == 'raw' else 'signals.nii.gz')
+    input_stack = _analysis_stack_name(plan, metabolite)
     argv = [executable, '-i', str(directory / input_stack), '-o', str(directory / 'randomise'),
             '-m', str(directory / 'population_mask.nii.gz'), '-d', str(Path(plan['output_dir']) / 'design.mat'),
             '-t', str(Path(plan['output_dir']) / 'design.con'), '-n', str(settings['permutations'])]
@@ -213,7 +229,7 @@ def _analyse_metabolite(plan, metabolite, executable, environment):
         for pmap in sorted(directory.glob(f'randomise*corrp_tstat{number}.nii.gz')):
             values = nib.load(pmap).get_fdata()
             summary.append({'metabolite': analyte['label'], 'analyte': metabolite,
-                            'contrast': label, 'map': str(pmap),
+                            'contrast': label, 'map': str(pmap), 'signal_stack': _analysis_stack_name(plan, metabolite),
                             'voxels_p_le_0.05': int(np.count_nonzero((values >= .95) & (population > 0)))})
     return summary
 
@@ -266,15 +282,11 @@ def validate_plan(plan):
     nproc = options.get('nproc', 1)
     if not isinstance(nproc, int) or not 1 <= nproc <= 64:
         raise ValueError('Concurrent metabolites (nproc) must be an integer from 1 to 64.')
-    gauge = options.get('gauge_correction', False)
-    if not isinstance(gauge, bool):
+    if not isinstance(options.get('gauge_correction', False), bool):
         raise ValueError('Gauge correction must be enabled or disabled.')
-    if gauge and len(metabolites) < 2:
-        raise ValueError('Gauge correction requires at least two selected metabolites.')
-    if any(item.get('view') == 'gauge' for item in analytes) and not gauge:
-        raise ValueError('Entries beginning with z require gauge correction. Enable gauge correction in Data.')
-    if gauge and len([item for item in analytes if item['operation'] != 'contrast']) < 2:
-        raise ValueError('Gauge correction needs at least two metabolite or ratio maps; contrasts do not count toward this requirement.')
+    gauge_inputs = {_gauge_key(item) for item in analytes if item['operation'] != 'contrast'}
+    if _gauge_enabled(plan) and len(gauge_inputs) < 2:
+        raise ValueError('Gauge correction requires at least two distinct metabolite or ratio maps. For example, enter z_Glu GABA.')
     selected_ids = {item['id'] for item in analytes}
     for item in analytes:
         if item['operation'] == 'contrast' and any(
@@ -307,7 +319,7 @@ def validate_plan(plan):
             if metric['operator'] not in ('<', '>', '<=', '>='): raise ValueError('Invalid quality operator.')
             if metric.get('threshold') is None or not math.isfinite(float(metric['threshold'])):
                 raise ValueError(f'Enter the {metric["name"]} threshold in {metric["unit"]}.')
-    source_paths = set()
+    source_paths = set(report_tissue_inputs(plan)[0].values())
     for row in rows:
         for analyte in analytes:
             for met in analyte['components']:
@@ -318,6 +330,7 @@ def validate_plan(plan):
                 source_paths.add(mask['precomputed'][analyte['id']])
     output = Path(plan['output_dir'])
     if not output.is_absolute(): raise ValueError('Use an absolute output directory.')
+    validate_output_location(plan, output)
     for value in source_paths:
         path = Path(value)
         if not path.is_file(): raise ValueError(f'Input no longer exists: {path}')
@@ -378,9 +391,11 @@ def _apply_gauge_correction(plan, reference, group_means):
     output = Path(plan['output_dir'])
     analytes = [item for item in _analytes(plan) if item['operation'] != 'contrast']
     metabolites = [item['id'] for item in analytes]
-    means = np.stack([group_means[metabolite] for metabolite in metabolites])
+    gauge_inputs = {_gauge_key(item): item for item in analytes}
+    positions = {key: index for index, key in enumerate(gauge_inputs)}
+    means = np.stack([group_means[item['id']] for item in gauge_inputs.values()])
     met_std, z_maps, gauge_term = gauge_from_group_means(means)
-    invalid = [item['label'] for item, value in zip(analytes, met_std)
+    invalid = [item['label'] for item, value in zip(gauge_inputs.values(), met_std)
                if not np.isfinite(value) or value <= np.finfo(float).eps]
     if invalid:
         raise ValueError('Gauge correction needs a finite, nonzero spatial standard deviation for: '
@@ -390,10 +405,13 @@ def _apply_gauge_correction(plan, reference, group_means):
     _save(gauge_term.astype(np.float32), reference, output / 'gauge_term.nii.gz')
     metadata = {'enabled': True, 'metabolites': metabolites,
                 'analytes': [{'id': item['id'], 'label': item['label']} for item in analytes],
-                'metabolite_spatial_std': {met: float(value) for met, value in zip(metabolites, met_std)},
+                'metabolite_spatial_std': {
+                    item['id']: float(met_std[positions[_gauge_key(item)]]) for item in analytes},
                 'formula': 'corrected = raw - gauge_term * metabolite_spatial_std; raw zeros remain zero'}
     atomic_text(output / 'gauge_metadata.json', json.dumps(metadata, indent=2) + '\n')
-    for met_index, (metabolite, analyte) in enumerate(zip(metabolites, analytes)):
+    for analyte in analytes:
+        metabolite = analyte['id']
+        met_index = positions[_gauge_key(analyte)]
         directory = output / metabolite
         _save(means[met_index].astype(np.float32), reference,
               directory / 'gauge_group_mean.nii.gz')
@@ -430,13 +448,18 @@ def _apply_gauge_correction(plan, reference, group_means):
 
 
 def execute(plan, *, prepare_only=False):
-    sources = validate_plan(plan)
+    validate_plan(plan)
     environment = dict(os.environ, FSLOUTPUTTYPE='NIFTI_GZ')
     executable = shutil.which('randomise', path=environment.get('PATH'))
     if not prepare_only and not executable:
         raise ValueError('FSL randomise was not found. Run ./install.sh or configure FSLDIR.')
     output = Path(plan['output_dir'])
     if output.exists(): raise ValueError('This run folder already exists. Choose a new run name to keep results intact.')
+    tissue_paths, tissue_probabilities = report_tissue_inputs(plan)
+    if tissue_paths:
+        first_analyte = _analytes(plan)[0]
+        first_image = _load(plan['rows'][0]['images'][first_analyte['components'][0]])
+        align_tissue_masks(tissue_paths, first_image, probabilities=tissue_probabilities)
     output.mkdir(parents=True)
     atomic_text(output / 'plan.json', json.dumps(plan, indent=2, allow_nan=False) + '\n')
     model, mask = plan['model'], plan['mask']
@@ -449,7 +472,7 @@ def execute(plan, *, prepare_only=False):
     if plan['randomise'].get('blocks'):
         atomic_text(output / 'design.grp', _vest(np.asarray(plan['randomise']['blocks'])[:, None]))
     reference = None
-    gauge_enabled = plan['randomise'].get('gauge_correction', False)
+    gauge_enabled = _gauge_enabled(plan)
     gauge_group_means = {}
     analytes = _analytes(plan)
     for analyte in analytes:
@@ -571,9 +594,14 @@ def main(argv=None):
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--report-only', action='store_true',
                         help='Regenerate the visual HTML report for an existing completed run.')
+    parser.add_argument('--gm-mask', type=Path, help='Gray matter binary NIfTI for a report-only run.')
+    parser.add_argument('--wm-mask', type=Path, help='White matter binary NIfTI for a report-only run.')
     args = parser.parse_args(argv)
     if args.prepare_only and args.report_only:
         parser.error('--prepare-only and --report-only cannot be combined.')
+    if args.gm_mask or args.wm_mask:
+        if not (args.report_only and args.gm_mask and args.wm_mask):
+            parser.error('--gm-mask and --wm-mask must be supplied together with --report-only.')
     try:
         from vlad.gui.commands import runtime_environment
         from vlad.paths import project_root
@@ -582,6 +610,8 @@ def main(argv=None):
         plan = json.loads(args.plan.read_text())
         if args.report_only:
             from vlad.workflow.report import generate_guided_report
+            if args.gm_mask:
+                plan['tissue_masks'] = {'gm': str(args.gm_mask), 'wm': str(args.wm_mask)}
             output = Path(plan['output_dir'])
             if not output.is_dir():
                 raise ValueError(f'The run output folder does not exist: {output}')

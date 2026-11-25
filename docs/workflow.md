@@ -101,6 +101,9 @@ sub-001_ses-V1_space-mni_desc-fwhm_mrsi.nii.gz
 ```
 
 During MRSI preparation, VLAD validates the expected files, creates derived sum/ratio/quotient maps, and creates subject-level quality masks using SNR, FWHM, and CRLB. Missing files are reported in `GLOBAL_DIR/not_found.txt`.
+Legacy preparation writes the derived MRSI maps and quality masks under
+`GLOBAL_DIR/Results/prepared-mrsi/`. The original derivative folder remains
+an input.
 
 The preparation script creates:
 

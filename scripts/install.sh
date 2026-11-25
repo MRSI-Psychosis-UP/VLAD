@@ -10,6 +10,7 @@ SKIP_SYSTEM=false
 SKIP_FSL=false
 NO_CHECK=false
 ASSUME_YES=false
+ADD_TO_PATH=true
 PYTHON_BIN="${VLAD_BOOTSTRAP_PYTHON:-}"
 FSL_DEST=""
 FSL_EXPLICIT=false
@@ -26,7 +27,7 @@ Usage: ./install.sh [OPTIONS]
 
 Install the complete Python/FSL/SwE workflow and configure ./vlad.
 Missing system prerequisites use apt (Debian/Ubuntu) or Homebrew (macOS).
-Existing working FSL installations are reused; no shell profiles are edited.
+Existing working FSL installations are reused. The installer adds vlad to your user PATH by default.
 
   --reports-only      Install Python reports/browser without FSL or desktop tools
   --python PATH       Select Python 3.10–3.12 (Tk required for the full workflow)
@@ -34,6 +35,8 @@ Existing working FSL installations are reused; no shell profiles are edited.
   --skip-system       Do not install system packages (use existing prerequisites)
   --skip-fsl          Do not download FSL; full installation still checks it
   --no-check          Skip final dependency checks; installation is unverified
+  --no-add-to-path    Skip user launcher and shell PATH setup
+  --add-to-path       Install the user launcher and configure PATH (default)
   --yes              Use noninteractive package-manager/bootstrap operation
   -h, --help          Show this help
 HELP
@@ -45,6 +48,8 @@ while [[ $# -gt 0 ]]; do
         --skip-system) SKIP_SYSTEM=true; shift ;;
         --skip-fsl) SKIP_FSL=true; shift ;;
         --no-check) NO_CHECK=true; shift ;;
+        --add-to-path) ADD_TO_PATH=true; shift ;;
+        --no-add-to-path) ADD_TO_PATH=false; shift ;;
         --yes) ASSUME_YES=true; shift ;;
         --python|--fsl-dir)
             [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "$1 requires a path."
@@ -290,6 +295,12 @@ if [[ "$NO_CHECK" == false ]]; then
     else say "Full Python/FSL/SwE installation is ready."; fi
 else
     say "Installed; dependency checks were skipped. This installation is unverified."
+fi
+if [[ "$ADD_TO_PATH" == true ]]; then
+    source "${VLAD_ROOT}/scripts/install-path.sh"
+    if ! vlad_add_to_path; then
+        fail "VLAD is installed, but PATH setup failed. Run ${VLAD_ROOT}/vlad directly."
+    fi
 fi
 printf 'Run without activation: %q --help\n' "${VLAD_ROOT}/vlad"
 printf 'Recheck dependencies: %q doctor --profile %s\n' "${VLAD_ROOT}/vlad" "${profile:-full}"

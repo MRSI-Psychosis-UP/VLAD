@@ -31,6 +31,8 @@ class InstallerTests(unittest.TestCase):
             shutil.copy2(ROOT / name, self.checkout / name)
         self.caller = self.work / "different launch directory"
         self.caller.mkdir()
+        test_home = self.work / "isolated installer home"
+        test_home.mkdir()
         self.tools = self.work / "mock tools"
         self.tools.mkdir()
         self.log = self.work / "actions.jsonl"
@@ -46,6 +48,8 @@ class InstallerTests(unittest.TestCase):
             if name.startswith(("VLAD_", "FSL", "UV_")):
                 self.env.pop(name)
         self.env.update(
+            HOME=str(test_home),
+            SHELL="/bin/bash",
             PATH=str(self.tools) + os.pathsep + "/usr/bin:/bin",
             VLAD_TEST_INSTALL_ROOT=str(self.checkout),
             VLAD_TEST_LOG=str(self.log),
@@ -190,6 +194,63 @@ elif ROLE == "admin":
 
     def assert_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_path_default_is_idempotent_and_uses_the_checkout_launcher(self):
+        home = self.work / "test home"
+        home.mkdir()
+        bash_profile = home / ".bash_profile"
+        bash_profile.write_text("# existing login setup")  # No trailing newline.
+        env = self.env | {"HOME": str(home), "SHELL": "/bin/bash"}
+
+        self.assert_ok(self.reports("--no-add-to-path", env=env))
+        self.assertEqual(list(home.iterdir()), [bash_profile])
+        self.assertEqual(bash_profile.read_text(), "# existing login setup")
+        for _ in range(2):
+            self.assert_ok(self.reports(env=env))
+        launcher = home / ".local/bin/vlad"
+        self.assertTrue(os.access(launcher, os.X_OK))
+        self.assertTrue(bash_profile.read_text().startswith("# existing login setup\n"))
+        for profile in (bash_profile, home / ".bashrc"):
+            self.assertEqual(profile.read_text().count("# >>> VLAD user PATH >>>"), 1)
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c",
+             '. "$HOME/.bash_profile" && . "$HOME/.bashrc" && exec vlad "$@"',
+             "terminal", "gui", "literal *", "path with 'quotes'"],
+            cwd=self.caller, env=env, capture_output=True, text=True, check=False,
+        )
+        self.assert_ok(result)
+        launched = self.actions("cli")[-1]
+        self.assertEqual(launched["cwd"], str(self.caller))
+        self.assertEqual(launched["args"], ["gui", "literal *", "path with 'quotes'"])
+        self.assertEqual(launched["path"].split(os.pathsep).count(str(launcher.parent)), 1)
+
+    def test_path_supports_custom_zsh_and_fish_configuration_directories(self):
+        home = self.work / "test home"
+        home.mkdir()
+        config = self.work / "custom config"
+        base_env = self.env | {"HOME": str(home)}
+        zsh_env = base_env | {"SHELL": "/bin/zsh", "ZDOTDIR": str(config / "zsh")}
+        self.assert_ok(self.reports("--add-to-path", env=zsh_env))
+        self.assertTrue((config / "zsh/.zprofile").is_file())
+        self.assertTrue((config / "zsh/.zshrc").is_file())
+        fish_env = base_env | {"SHELL": "/bin/fish", "XDG_CONFIG_HOME": str(config)}
+        for _ in range(2):
+            self.assert_ok(self.reports("--add-to-path", env=fish_env))
+        fish = (config / "fish/conf.d/vlad-path.fish").read_text()
+        self.assertIn('set -gx PATH $PATH "$HOME/.local/bin"', fish)
+        self.assertEqual(fish.count("# >>> VLAD user PATH >>>"), 1)
+        self.assertFalse((home / ".bashrc").exists())
+
+    def test_path_option_preserves_an_existing_unmanaged_command(self):
+        launcher = self.work / "test home/.local/bin/vlad"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("existing command\n")
+        env = self.env | {"HOME": str(launcher.parents[2]), "SHELL": "/bin/bash"}
+        result = self.reports("--add-to-path", env=env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("preserving the existing command", result.stderr)
+        self.assertEqual(launcher.read_text(), "existing command\n")
+        self.assertFalse((launcher.parents[2] / ".bashrc").exists())
 
     def fsl_fixture(self):
         fsldir = self.work / "existing FSL with 'quoted' spaces"

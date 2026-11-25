@@ -971,10 +971,6 @@ collect_and_confirm_inputs_global() {
         config_values[GLOBAL_DIR]=${GLOBAL_DIR}
         prompt_for_value "COHORT" "What is the name of the cohort ?" ""
         prompt_for_file "T1_MNI" "Select the standard space T1 that will be used to display results"
-        if [[ ${config_values[T1_MNI]} == *.gz ]]; then
-            gunzip -f ${config_values[T1_MNI]}
-            config_values[T1_MNI]="${config_values[T1_MNI]%.gz}"
-        fi
 
         prompt_for_directory "DIR_RANALYSES" "Where should report data and plots be exported?" ""
         prompt_for_file "LIST_ALL_SUBJECTS" "Select the .txt file with the list of ALL the subjects you have in your cohort (SUBJECT_VISIT)" "${config_values[GLOBAL_DIR]}"
@@ -1092,6 +1088,7 @@ collect_and_confirm_inputs_mrsi() {
     while true; do
         # Collect graphical directory/file inputs and terminal text inputs
         prompt_for_directory "NII_DIR_MRSI" "Select the path to subject MRSI files" "${GLOBAL_DIR}"
+        vlad_require_separate_output "$GLOBAL_DIR" "${config_values[NII_DIR_MRSI]}" || return 1
         # while true; do
         #     prompt_for_value "NII_DIR_MRSI_orga" "Are all the files in one directory (type : \"allinone\") or in a subject directory (type : \"bysubj\")" "bysubj"
         #     if [[ ${config_values[NII_DIR_MRSI_orga]} == "allinone" || ${config_values[NII_DIR_MRSI_orga]} == "bysubj" ]]; then
@@ -1244,9 +1241,9 @@ find_files_mrsi() {
 
 # Resolve quality inputs without changing where derived maps are written.
 resolve_mrsi_quality_input() {
-    local filename="$1" resolved
-    if [[ -f "$PWD/$filename" ]]; then
-        printf '%s\n' "$PWD/$filename"
+    local filename="$1" signal_dir="$2" resolved
+    if [[ -f "$signal_dir/$filename" ]]; then
+        printf '%s\n' "$signal_dir/$filename"
         return 0
     fi
     resolved=$(find "${NII_DIR_MRSI}" -type f -name "$filename" -print -quit 2>/dev/null)
@@ -1254,13 +1251,18 @@ resolve_mrsi_quality_input() {
         printf '%s\n' "$resolved"
         return 0
     fi
-    echo "Quality input '$filename' not found in '$PWD' or under '$NII_DIR_MRSI'." >&2
+    echo "Quality input '$filename' not found under '$NII_DIR_MRSI'." >&2
     return 1
 }
 
 process_mrsi_nii() {
 
     local file=$1
+    [[ "${file,,}" != crlb ]] || return 0
+    local -x FSLOUTPUTTYPE=NIFTI_GZ
+    [[ -n "$MRSI_COMPRESSED" ]] || FSLOUTPUTTYPE=NIFTI
+    local derived_dir="${GLOBAL_DIR}/Results/prepared-mrsi"
+    local input_map numerator_map denominator_map signal_dir
     local modes=()
     if [[ "${B0_MODE}" == "7" ]]; then
         modes=("7" "7as3")
@@ -1309,13 +1311,12 @@ process_mrsi_nii() {
         echo "There is an error, no global file !"
     fi
 
-    cd ${NII_DIR_MRSI}
-    SUBJECTS=($(cat $LIST_ALL_SUBJECTS))
+    NII_DIR_MRSI=$(cd "$NII_DIR_MRSI" && pwd -P) || return 1
+    SUBJECTS=($(cat "$LIST_ALL_SUBJECTS"))
     for SUBJ in ${SUBJECTS[@]}; do
         echo "=====Doing $SUBJ ======"
         sub=${SUBJ%_*}
         visit=${SUBJ#*_}
-        cd ${NII_DIR_MRSI}
 
         file_name=$(name_subject_file_mrsi "${sub}" "${visit}" mrsi "${METAB[0]}" "${file}" "${MRSI_COMPRESSED}")
         if [[ $? -ne 0 ]]; then
@@ -1330,9 +1331,10 @@ process_mrsi_nii() {
             continue
         fi
 
-        directory_towork=$(dirname "$FILE_PATH")
-
-        cd "$directory_towork" || return 1
+        signal_dir=$(dirname "$FILE_PATH")
+        vlad_require_separate_output "$derived_dir/sub-${sub}/ses-${visit}" "$NII_DIR_MRSI" || return 1
+        mkdir -p "$derived_dir/sub-${sub}/ses-${visit}" || return 1
+        cd "$derived_dir/sub-${sub}/ses-${visit}" || return 1
 
         for MODE in "${modes[@]}"; do
             set_mode_vars "$MODE"
@@ -1357,27 +1359,22 @@ process_mrsi_nii() {
             done
 
             echo "Mode ${MODE}: Doing Sum of metabolites"
-            if [[ ${file} == "crlb" || ${file} == "CRLB" ]]; then
-                echo "CRLB file, skipping"
-                continue
-            fi
-
             METABSUM_ACTIVE=()
             METABQUOTIENTS=()
             COMMAND_SUM=()
             first_command="$(name_subject_file_mrsi "${sub}" "${visit}" "mrsi" "${active_metabs[0]}" "${file}" "${MRSI_COMPRESSED}")"
 
-            COMMAND_SUM=("$first_command")
+            COMMAND_SUM=("$signal_dir/$first_command")
             for ((i = 1; i < ${#active_metabs[@]}; i++)); do
-                add_command="-add $(name_subject_file_mrsi $sub $visit mrsi "${active_metabs[i]}" $file "${MRSI_COMPRESSED}")"
-                COMMAND_SUM+=("$add_command")
+                add_command=$(name_subject_file_mrsi "$sub" "$visit" mrsi "${active_metabs[i]}" "$file" "${MRSI_COMPRESSED}")
+                COMMAND_SUM+=(-add "$signal_dir/$add_command")
             done
             sum_command="$(name_subject_file_mrsi $sub $visit mrsi "${sum_label}" $file "${MRSI_COMPRESSED}")"
             COMMAND_SUM+=("$sum_command")
 
             sum_ok=false
             if should_create_file "${sum_command}"; then
-                if fslmaths ${COMMAND_SUM[@]}; then
+                if fslmaths "${COMMAND_SUM[@]}"; then
                     sum_ok=true
                 else
                     PREP_FAILED=true
@@ -1394,8 +1391,8 @@ process_mrsi_nii() {
                     ratio_out=$(name_subject_file_mrsi "${sub}" "${visit}" "mrsi" "${MET}${ratio_suffix}" "${file}" "${MRSI_COMPRESSED}")
                     status=0
                     if should_create_file "$ratio_out"; then
-                        fslmaths $(name_subject_file_mrsi "${sub}" "${visit}" "mrsi" "${MET}" "${file}" "${MRSI_COMPRESSED}") -div $(name_subject_file_mrsi "${sub}" "${visit}" "mrsi" "${sum_label}" "${file}" "${MRSI_COMPRESSED}") "$ratio_out"
-                        status=$?
+                        input_map=$(name_subject_file_mrsi "$sub" "$visit" mrsi "$MET" "$file" "${MRSI_COMPRESSED}")
+                        fslmaths "$signal_dir/$input_map" -div "$sum_command" "$ratio_out" || status=$?
                     fi
                     if [[ $status -eq 0 ]]; then
                         METABSUM_ACTIVE+=("${MET}${ratio_suffix}")
@@ -1427,8 +1424,9 @@ process_mrsi_nii() {
                     quotient_out=$(name_subject_file_mrsi $sub $visit mrsi "${METABQUOTIENT}" $file "${MRSI_COMPRESSED}")
                     status=0
                     if should_create_file "$quotient_out"; then
-                        fslmaths $(name_subject_file_mrsi $sub $visit mrsi "${numerator}" $file "${MRSI_COMPRESSED}") -div $(name_subject_file_mrsi $sub $visit mrsi "${denominator}" $file "${MRSI_COMPRESSED}") "$quotient_out"
-                        status=$?
+                        numerator_map=$(name_subject_file_mrsi "$sub" "$visit" mrsi "$numerator" "$file" "${MRSI_COMPRESSED}")
+                        denominator_map=$(name_subject_file_mrsi "$sub" "$visit" mrsi "$denominator" "$file" "${MRSI_COMPRESSED}")
+                        fslmaths "$signal_dir/$numerator_map" -div "$signal_dir/$denominator_map" "$quotient_out" || status=$?
                     fi
                     if [[ $status -eq 0 ]]; then
                         METABQUOTIENTS+=("${METABQUOTIENT}")
@@ -1445,12 +1443,12 @@ process_mrsi_nii() {
             CRLB_Thresh=20
             local snr_input fwhm_input crlb_input quality_filename qmask_failed
             quality_filename=$(name_subject_file_mrsi_spec "$sub" "$visit" mrsi snr "$MRSI_COMPRESSED")
-            if ! snr_input=$(resolve_mrsi_quality_input "$quality_filename"); then
+            if ! snr_input=$(resolve_mrsi_quality_input "$quality_filename" "$signal_dir"); then
                 echo "Skipping QMASKS for $SUBJ, mode $MODE: missing SNR input." >&2
                 continue
             fi
             quality_filename=$(name_subject_file_mrsi_spec "$sub" "$visit" mrsi fwhm "$MRSI_COMPRESSED")
-            if ! fwhm_input=$(resolve_mrsi_quality_input "$quality_filename"); then
+            if ! fwhm_input=$(resolve_mrsi_quality_input "$quality_filename" "$signal_dir"); then
                 echo "Skipping QMASKS for $SUBJ, mode $MODE: missing FWHM input." >&2
                 continue
             fi
@@ -1465,7 +1463,7 @@ process_mrsi_nii() {
                 qmask_out=$(name_subject_file_mrsi "$sub" "$visit" mrsi "$MET" QMask "$MRSI_COMPRESSED")
                 if should_create_file "$qmask_out"; then
                     quality_filename=$(name_subject_file_mrsi "$sub" "$visit" mrsi "$MET" crlb "$MRSI_COMPRESSED")
-                    if ! crlb_input=$(resolve_mrsi_quality_input "$quality_filename"); then
+                    if ! crlb_input=$(resolve_mrsi_quality_input "$quality_filename" "$signal_dir"); then
                         echo "Skipping QMask for $MET, $SUBJ: missing CRLB input." >&2
                         qmask_failed=true
                         continue
@@ -1527,6 +1525,12 @@ mrsi_do() {
     fi
 
     source config_mrsi.sh
+    vlad_require_separate_output "$GLOBAL_DIR" "$NII_DIR_MRSI" || return 1
+    for output_dir in "$GLOBAL_DIR/Results" "$GLOBAL_DIR/Results/prepared-mrsi"; do
+        if [[ -e "$output_dir" ]]; then
+            vlad_require_separate_output "$output_dir" "$NII_DIR_MRSI" || return 1
+        fi
+    done
 
     case "${B0_MODE}" in
     7)
@@ -1620,7 +1624,7 @@ mrsi_do() {
 
     for file_mrsi_val in ${MRSI_FILES_VALIDATED[@]}; do
         echo "======== Doing file $file_mrsi_val ======="
-        process_mrsi_nii "${file_mrsi_val}"
+        process_mrsi_nii "${file_mrsi_val}" || return 1
     done
 
     cd "${GLOBAL_DIR}" || return 1
@@ -1981,6 +1985,9 @@ if [[ "$NONINTERACTIVE" == true ]]; then
     input_setting="NII_DIR_${upper_modality}"
     compression_setting="NII_DIR_${upper_modality}_compression"
     [[ -d "${!input_setting}" && "${!input_setting}" != *[[:space:]]* ]] || { echo "Input directory is missing or contains whitespace: ${!input_setting}" >&2; exit 1; }
+    if [[ "$PREP_MODALITY" == mrsi ]]; then
+        vlad_require_separate_output "$GLOBAL_DIR" "$NII_DIR_MRSI" || exit 1
+    fi
     compressed=""
     [[ "${!compression_setting}" != yes && "${!compression_setting}" != y ]] || compressed=".gz"
     script_dir="$VLAD_HOME"
