@@ -82,6 +82,11 @@ def _subject_visit(subject, visit=None, visit_column: str | None = None) -> str:
     return subject + "_" + session
 
 
+def missing_covariate_values(series: pd.Series) -> pd.Series:
+    """Identify empty covariate cells and textual missing-value markers."""
+    return series.isna() | series.astype(str).str.strip().isin({"", "n/a", "nan", "NA"})
+
+
 def filter_rows(frame: pd.DataFrame, subject_column: str, visit_column: str | None = None,
                 filters: list[dict] | None = None, include_subjects: list[str] | None = None,
                 exclude_subjects: list[str] | None = None,
@@ -143,9 +148,8 @@ def filter_rows(frame: pd.DataFrame, subject_column: str, visit_column: str | No
         if not isinstance(values, (list, tuple, set, np.ndarray, pd.Series)):
             values = [values]
         series = frame[column]
-        nonmissing = series.notna() & series.astype(str).str.strip().ne("")
         if operator == "not missing":
-            keep = nonmissing
+            keep = ~missing_covariate_values(series)
         elif operator in ("in", "not in"):
             normalized = {_text(value) for value in values}
             if not normalized:
@@ -153,7 +157,7 @@ def filter_rows(frame: pd.DataFrame, subject_column: str, visit_column: str | No
             keep = series.map(_text).isin(normalized)
             if operator == "not in":
                 keep = ~keep
-            keep &= nonmissing
+            keep &= series.notna() & series.astype(str).str.strip().ne("")
         elif operator in (">", ">=", "<", "<=", "between"):
             expected = 2 if operator == "between" else 1
             if len(values) != expected:

@@ -114,7 +114,8 @@ The command generator has six steps:
    correction. For example, `z_Glu GABA` tests corrected Glu and raw GABA.
    For DWI, choose a `dwi-preprocessing/` folder, enter the exact shared space
    (such as `mni`), click **Scan DWI folder**, and select one or more 3D scalar
-   series. Each series matches the same filename pattern across subject visits.
+   series. VLAD groups run and acquisition variants by default and counts visits
+   with a unique match for each series.
 2. **Population mask** — use one precomputed binary mask per metabolite/ratio or
    build population masks from matching quality maps. The defaults are CRLB
    `<20`, FWHM `<0.1` and SNR `>10`, with 68% population coverage.

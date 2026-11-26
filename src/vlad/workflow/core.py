@@ -10,7 +10,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from vlad.gui.design import validate_contrasts
+from vlad.gui.design import missing_covariate_values, validate_contrasts
 from vlad.gui.subjects import visit_label
 from vlad.preparation.bids import image_entities
 
@@ -179,8 +179,13 @@ def _by_visit(index):
     return result
 
 
-def _dwi_series(index, space, resolution):
-    """Group exact post-visit filename patterns, including legacy scalar suffixes."""
+def dwi_grouped_series_label(series: str) -> str:
+    """Return the series label shared by its run and acquisition variants."""
+    return '_'.join(token for token in series.split('_') if not token.startswith(('run-', 'acq-')))
+
+
+def _dwi_series(index, space, resolution, *, combine_run_acq=False):
+    """Group post-visit patterns, optionally ignoring only run and acquisition tags."""
     if not space:
         raise ValueError('Specify the exact DWI space- label.')
     if space.casefold() in NATIVE_SPACES:
@@ -197,6 +202,8 @@ def _dwi_series(index, space, resolution):
         tags = dict(re.findall(r'(?:^|_)(space|res)-([^_]+)', series))
         if tags.get('space') != space or (resolution and tags.get('res') != resolution):
             continue
+        if combine_run_acq:
+            series = dwi_grouped_series_label(series)
         result.setdefault(series, {}).setdefault(f'{sub}_{ses}', []).append(entry.path)
     return result
 
@@ -211,9 +218,9 @@ def _dwi_header_issue(path):
     return ''
 
 
-def discover_dwi_series(folder, *, space, resolution=''):
+def discover_dwi_series(folder, *, space, resolution='', combine_run_acq=False):
     """List DWI series with a 3D representative and their per-visit file counts."""
-    series = _dwi_series(index_images(folder), space, resolution)
+    series = _dwi_series(index_images(folder), space, resolution, combine_run_acq=combine_run_acq)
     return {label: {visit: len(paths) for visit, paths in visits.items()}
             for label, visits in sorted(series.items())
             if not _dwi_header_issue(next(iter(visits.values()))[0])}
@@ -223,7 +230,8 @@ def _scan_dwi_signals(config, visits):
     selected = config.get('dwi_series', [])
     if not selected or len(set(selected)) != len(selected):
         raise ValueError('Choose distinct DWI scalar-map series from the folder scan.')
-    indexed = _dwi_series(index_images(config['folder']), config.get('space', ''), config.get('resolution', ''))
+    indexed = _dwi_series(index_images(config['folder']), config.get('space', ''), config.get('resolution', ''),
+                          combine_run_acq=config.get('combine_run_acq', False))
     analytes = []
     for label in selected:
         slug = re.sub(r'[^A-Za-z0-9.+-]+', '-', label)[:80].rstrip('.-')
@@ -343,9 +351,20 @@ def build_model(frame: pd.DataFrame, roles: list[dict], centre=True) -> dict:
         name = row['Name']
         if name not in frame or name == 'Intercept':
             raise ValueError(f'Invalid model variable: {name}')
+        missing = missing_covariate_values(frame[name])
+        if missing.any():
+            count = int(missing.sum())
+            visits = f'{count} included visit{"" if count == 1 else "s"}'
+            identifiers = ['participant_id', 'session_id']
+            if all(column in frame for column in identifiers):
+                rows = frame.loc[missing, identifiers].head(5)
+                labels = ', '.join(visit_label(subject, session)
+                                   for subject, session in rows.itertuples(index=False, name=None))
+                if count > len(rows):
+                    labels += f' and {count - len(rows)} more'
+                visits += f' ({labels})'
+            raise ValueError(f'{name} is missing for {visits}. Correct the TSV or use the Has a value filter in Data.')
         raw = frame[name].reset_index(drop=True)
-        if raw.isna().any() or raw.astype(str).str.strip().isin(['', 'n/a', 'nan', 'NA']).any():
-            raise ValueError(f'{name}: missing values; explicitly exclude those rows in Data.')
         z_score = bool(row.get('Z-score', False))
         if z_score and row['Type'] != 'Numeric':
             raise ValueError(f'{name}: z-scoring is only available for numeric variables.')

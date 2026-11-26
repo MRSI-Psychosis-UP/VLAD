@@ -39,6 +39,17 @@ def apply_theme(theme: str = "Light") -> None:
             background: #087f8c; border-color: #087f8c; }
         .vlad-small { font-size: .84rem; color: #5e7581; }
         code { overflow-wrap: anywhere; }
+        .st-key-wf_dwi_picker div:has(> [data-testid="stMultiSelectTagsContainer"]) { max-height: none; }
+        .st-key-wf_dwi_picker [data-testid="stMultiSelectTagsContainer"] { flex-wrap: wrap; }
+        .st-key-wf_dwi_picker :is([data-tag], [data-baseweb="tag"]) {
+            flex: 0 0 calc(100% - .25rem); max-width: calc(100% - .25rem);
+            box-sizing: border-box; margin-inline: 0 .25rem;
+            height: auto; min-height: 1.5rem; padding-block: .15rem;
+        }
+        .st-key-wf_dwi_picker :is([data-tag], [data-baseweb="tag"]) > span:first-child {
+            flex: 1; min-width: 0; max-width: none; white-space: normal; overflow-wrap: anywhere;
+        }
+        .st-key-wf_dwi_picker :is([data-tag], [data-baseweb="tag"]) > :nth-child(2) { flex-shrink: 0; }
         @media (max-width: 700px) {
           .vlad-hero { padding: 1.2rem; }
           .vlad-heading { font-size: 1.7rem; }

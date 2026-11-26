@@ -57,12 +57,16 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    For DWI, choose a derivative folder such as `dwi-preprocessing/`, enter its
    exact shared space label, and optionally enter the filename resolution.
    Click **Scan DWI folder** and select one or more 3D scalar-map series.
-   VLAD lists the filename pattern after `sub-…_ses-…_`, keeping model,
-   acquisition, run and harmonization variants separate. The picker shows the
-   count of unique filename matches in the loaded TSV alongside the total
-   folder visits. **Load NIfTI paths** checks those files and shows how many TSV
-   visits have every selected series. Four-dimensional diffusion acquisitions
-   and subject-native group analyses are rejected.
+   By default, VLAD groups filenames that differ only in their `run-` or
+   `acq-` tags. Each entry corresponds to one model, metric, resolution and
+   harmonization setting. For exact filename patterns, turn off **Combine run
+   and acquisition variants**. Changing this setting refreshes the picker after
+   a scan.
+   The picker shows unique matches in the loaded TSV and the total visits in the
+   folder. **Load NIfTI paths** checks the files and shows how many TSV visits
+   have every selected series. A visit with multiple candidates for a series is
+   marked ambiguous. Four-dimensional diffusion acquisitions and subject-native
+   group analyses are rejected.
 
    Use **+ Add filter** to stack categorical
    or numeric covariate rules; active filters combine with AND and can be removed

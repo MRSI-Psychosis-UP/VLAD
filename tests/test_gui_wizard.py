@@ -150,15 +150,26 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertEqual(len(picker.options), 3)
         self.assertEqual(picker.options[-1], f'{partial} (2/8 TSV · 3 folder)')
         picker.set_value([partial]).run()
+        self.assertTrue(any('Image path check pending' in item.value for item in app.caption))
         self.click(app, 'Load NIfTI paths')
         self.assertTrue(any('2/8 TSV visits have all selected DWI maps' in item.value for item in app.warning))
+        self.assertTrue(any('2 with all selected maps · 6 without a complete map match (6 included)' in item.value
+                            for item in app.caption))
         table = next(widget.value for widget in app.data_editor if 'Images found' in widget.value)
         self.assertEqual(table['Images found'].tolist().count('✅'), 2)
         self.assertFalse(table['Exclude'].any())
+        app.selectbox(key='wf_filter_column').set_value('Sex')
+        app.text_input(key='wf_filter_text').set_value('F').run()
+        self.click(app, '+ Add filter')
+        self.assertTrue(any('4 included · 4 excluded · 2 with all selected maps · 6 without a complete map match (3 included)'
+                            in item.value for item in app.caption))
+        self.click(app, 'Reset all filters')
         picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
         picker.set_value(list(series)).run()
         self.click(app, 'Load NIfTI paths')
         self.assertTrue(any('8/8 TSV visits have all selected DWI maps' in item.value for item in app.success))
+        self.assertTrue(any('8 with all selected maps · 0 without a complete map match' in item.value
+                            for item in app.caption))
         self.page(app, 1)
         self.assertEqual(app.radio(key='wf_dwi_mask_mode').value, 'Common nonzero coverage')
         self.assertFalse(any(button.label == 'Load quality paths' for button in app.button))
@@ -191,6 +202,59 @@ class GuidedInterfaceTests(GuidedFixture):
         self.healthy(app)
         self.assertEqual(app.text_input(key='wf_images').value, str(self.inputs))
         self.assertEqual(app.text_input(key='wf_metabolites').value, 'NAA CrPCr')
+
+    def test_dwi_groups_run_acquisition_tags_by_default_and_flags_duplicate_visits(self):
+        folder = self.base / 'dwi'
+        folder.mkdir()
+        harmonized = 'space-mni_model-dki_param-ad_desc-designerCombat_dwimap'
+        unharmonized = 'space-mni_model-dki_param-ad_desc-designer_dwimap'
+        variants = [
+            (0, 'run-01', harmonized),
+            (0, 'run-01_acq-dsiNdir129', harmonized),
+            (1, 'run-01_acq-dsiNdir129', harmonized),
+            (2, 'run-02_acq-dsiNdir257', harmonized),
+            (3, 'run-01_acq-dsiNdir129', unharmonized),
+        ]
+        image = nib.Nifti1Image(np.ones((2, 2, 2), dtype=np.float32), np.eye(4))
+        for index, tag, series in variants:
+            subject, session = self.visits[index].split('_')
+            nib.save(image, folder / f'sub-{subject}_ses-{session}_{tag}_{series}.nii.gz')
+
+        app = self.app()
+        self.load_data(app)
+        app.radio(key='wf_modality').set_value('DWI').run()
+        app.text_input(key='wf_dwi_images').set_value(str(folder)).run()
+        self.click(app, 'Scan DWI folder')
+        grouping = 'wf_dwi_group_run_acq'
+        self.assertTrue(app.checkbox(key=grouping).value)
+        picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
+        grouped_options = [f'{harmonized} (2/8 TSV · 3 folder)',
+                           f'{unharmonized} (1/8 TSV · 1 folder)']
+        self.assertEqual(picker.options, grouped_options)
+        picker.set_value([unharmonized]).run()
+
+        app.checkbox(key=grouping).set_value(False).run()
+        picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
+        exact_series = f'run-01_{harmonized}'
+        self.assertEqual(len(picker.options), 4)
+        self.assertIn(f'{exact_series} (1/8 TSV · 1 folder)', picker.options)
+        self.assertTrue(any('Separate variants are shown' in item.value for item in app.caption))
+        picker.set_value([exact_series]).run()
+        self.click(app, 'Load NIfTI paths')
+        matched = app.session_state['guided_workflow']['dwi_signals']
+        self.assertEqual([row['visit'] for row in matched['rows'] if row['complete']], self.visits[:1])
+
+        app.checkbox(key=grouping).set_value(True).run()
+        picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
+        self.assertEqual(picker.options, grouped_options)
+        self.assertEqual(picker.value, [harmonized])
+        self.assertTrue(any('Click Load NIfTI paths' in item.value for item in app.info))
+        self.click(app, 'Load NIfTI paths')
+        matched = app.session_state['guided_workflow']['dwi_signals']
+        self.assertTrue(matched['config']['combine_run_acq'])
+        self.assertEqual([row['visit'] for row in matched['rows'] if row['complete']], self.visits[1:3])
+        self.assertIn('2 matches', matched['rows'][0]['issues'][0])
+        self.assertFalse(matched['rows'][3]['complete'])
 
     def test_default_workflow_has_six_steps_and_preserves_inputs_across_pages(self):
         app = self.app(); self.healthy(app)
@@ -233,6 +297,11 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertEqual(app.text_input(key='wf_images').value, str(self.inputs))
         self.assertEqual(app.text_input(key='wf_space').value, 'MNI')
         self.assertFalse(app.file_uploader)
+        self.page(app, 3)
+        selector = next(item for item in app.multiselect if item.label == 'Contrasts to test')
+        self.assertEqual(selector.value, [selector.options[0]])
+        self.page(app, 4)
+        self.assertEqual(app.number_input(key='wf_nperm').value, 4)
         self.page(app, 5)
         self.assertEqual(app.text_input(key='wf_output').value, str(self.table.parent))
         app.text_input(key='wf_output').set_value(str(self.base / 'study'))
@@ -269,6 +338,7 @@ class GuidedInterfaceTests(GuidedFixture):
         # snapshot and stale blank field snapshots. Returning to Data must
         # migrate them away and recover the last successfully scanned selectors.
         workflow = app.session_state['guided_workflow']
+        workflow.pop('raw_data_widgets')
         workflow.setdefault('widgets', {})['wf_scan_metabolites'] = True
         for key in ('wf_covars', 'wf_images', 'wf_space', 'wf_metabolites', 'wf_desc', 'wf_resolution'):
             workflow['widgets'][key] = ''
@@ -285,6 +355,42 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertEqual(len(app.session_state['guided_workflow']['frame']), 8)
         self.page(app, 5)
         self.assertEqual(app.text_input(key='wf_output').value, str(self.base / 'study'))
+        self.assertEqual(app.text_input(key='wf_run_name').value, 'TestRun')
+
+    def test_data_edits_on_navigation_keep_exact_text_and_intentional_blanks(self):
+        app = self.app()
+        self.load_data(app)
+        app.text_input(key='global_bids_dir').set_value(str(self.base)).run()
+        entries = {'wf_covars': '', 'wf_images': '', 'wf_space': 'space-MNI',
+                   'wf_metabolites': 'met-NAA, met-CrPCr', 'wf_desc': '', 'wf_resolution': ''}
+        for key, value in entries.items():
+            app.text_input(key=key).set_value(value)
+        self.page(app, 5)
+        state = app.session_state['guided_workflow']
+        self.assertEqual(state['covars_path_current'], '')
+        self.assertEqual(state['data'], {'folder': '', 'space': 'MNI', 'metabolites': ['NAA', 'CrPCr'],
+                                        'desc': '', 'resolution': ''})
+        self.page(app, 0)
+        for key, value in entries.items():
+            self.assertEqual(app.text_input(key=key).value, value)
+
+    def test_mask_quality_entries_survive_source_and_step_changes(self):
+        app = self.app()
+        self.load_data(app)
+        self.page(app, 1)
+        app.text_input(key='wf_quality_space').set_value('CustomSpace')
+        app.text_input(key='wf_quality_res').set_value('').run()
+        app.session_state['wf_metrics'] = {
+            'edited_rows': {1: {'threshold': .08}}, 'added_rows': [], 'deleted_rows': []}
+        app.run()
+        app.radio(key='wf_mask_mode').set_value('Precomputed mask per metabolite').run()
+        self.page(app, 5)
+        self.page(app, 1)
+        app.radio(key='wf_mask_mode').set_value('Construct from quality maps').run()
+        self.healthy(app)
+        self.assertEqual(app.text_input(key='wf_quality_space').value, 'CustomSpace')
+        self.assertEqual(app.text_input(key='wf_quality_res').value, '')
+        self.assertEqual(app.session_state['guided_workflow']['mask']['metrics'][1]['threshold'], .08)
 
     def test_global_theme_bids_and_local_data_folder_persist(self):
         app = self.app()
@@ -332,6 +438,29 @@ class GuidedInterfaceTests(GuidedFixture):
         self.click(app, 'Reset all filters')
         self.page(app, 2)
         self.assertTrue(any('8 observations' in item.value for item in app.success))
+
+    def test_missing_covariate_names_visit_and_has_a_value_filter_resolves_it(self):
+        frame = self.frame.rename(columns={'Sex': 'sex'})
+        frame.loc[2, 'sex'] = 'n/a'
+        frame.to_csv(self.table, sep='\t', index=False)
+        app = self.app()
+        self.load_data(app)
+        self.page(app, 2)
+        workflow = app.session_state['guided_workflow']
+        editor_key = f'wf_roles_{workflow["table_id"][:12]}_{workflow.get("roles_editor_revision", 0)}'
+        app.session_state[editor_key] = {
+            'edited_rows': {1: {'Include': True, 'Confound': True}}, 'added_rows': [], 'deleted_rows': []}
+        app.run()
+        self.healthy(app)
+        self.assertTrue(any('sex is missing for 1 included visit (002_01)' in item.value for item in app.warning))
+        self.assertEqual(app.selectbox(key='wf_reference_sex').options, ['F', 'M'])
+
+        self.page(app, 0)
+        app.selectbox(key='wf_filter_column').set_value('sex')
+        app.selectbox(key='wf_filter_mode').set_value('Has a value').run()
+        self.click(app, '+ Add filter')
+        self.page(app, 2)
+        self.assertTrue(any('7 observations' in item.value for item in app.success))
 
     def test_image_folder_scan_proposes_metabolite_labels(self):
         app = self.app(); self.healthy(app)
