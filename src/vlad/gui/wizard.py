@@ -16,10 +16,10 @@ import streamlit as st
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import filter_rows, load_contrasts, missing_covariate_values, validate_contrasts
 from vlad.gui.file_picker import path_input
-from vlad.gui.templates import (_cache_home, fetch_anatomical_image, fsl_white_matter, list_templates,
-                                template_options, tissue_probabilities, validate_reference_anatomy,
+from vlad.gui.templates import (_cache_home, fetch_anatomical_image, fsl_white_matter, list_anatomical_images,
+                                tissue_probabilities,
                                 white_matter_probability)
-from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, dwi_grouped_series_label, local_nifti_path,
+from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, dwi_grouped_series_label,
                                 parse_contrast_text, read_covariates, scan_signals, scan_quality, signature,
                                 validate_mask_path, validate_output_location, validate_population_paths)
 from vlad.workflow.runner import validate_plan
@@ -757,45 +757,36 @@ def contrast_page(state):
         st.warning(str(exc))
 
 
-def _report_background_input(state):
-    source = st.radio('Background source', ['Automatic', 'TemplateFlow', 'Custom NIfTI'],
-                      key='wf_report_background_source', horizontal=True,
-                      help='Anatomy for the corrected-map overlays in the HTML report.')
-    if source == 'Automatic':
-        return None
+def _tfce_slice_template(state):
     try:
-        if source == 'Custom NIfTI':
-            path = path_input('Report background NIfTI', key='wf_report_background_path',
-                              extensions=NIFTI_EXTENSIONS).strip()
-            if not path:
-                return ''
-            reference = validate_reference_anatomy(local_nifti_path(path))
-            st.caption(f'✅ Report background ready · {reference.name}')
-            return str(reference)
-        templates = list_templates()
-        if not templates:
-            raise ValueError('The TemplateFlow catalogue has no anatomical images.')
         space = state.get('data', {}).get('space', '')
         preferred = 'MNI152NLin6Asym' if space.casefold() == 'mni' else space
-        default = next((name for name in (preferred, 'MNI152NLin2009cAsym') if name in templates), templates[0])
-        template = st.selectbox('TemplateFlow report template', templates, index=templates.index(default),
-                                key='wf_report_template')
-        names = template_options(template)['files']
-        name = st.selectbox('Background image', names, format_func=lambda item: Path(item).name,
-                            key=f'wf_report_anatomy_{template}')
-        selection = (template, name)
-        if st.button('Load report template'):
-            validate_output_location(state, _cache_home())
-            with st.spinner('Loading report anatomy…'):
-                path = fetch_anatomical_image(template, name)
-            state['loaded_report_template'] = (selection, str(path))
+        names = sorted(list_anatomical_images(), key=lambda name: (
+            not name.startswith(f'tpl-{preferred}/'), 'res-02_T1w' not in name, name))
+        options = ['Automatic', *names]
         loaded = state.get('loaded_report_template')
+        if loaded and state.get('report_reference') == loaded[1] and loaded[0][1] in names:
+            st.session_state.setdefault('wf_tfce_slice_template', loaded[0][1])
+        name = st.selectbox('TFCE slice template', options, key='wf_tfce_slice_template',
+                            format_func=lambda item: Path(item).name.removeprefix('tpl-').removesuffix('.gz').removesuffix('.nii'),
+                            help='Choose TemplateFlow anatomy in the same space as the TFCE maps. '
+                                 'For Watson maps registered to FMRIB58, choose MNI152NLin6Asym.')
+        if name == 'Automatic':
+            return None
+        template = name.split('/', 1)[0].removeprefix('tpl-')
+        selection = (template, name)
+        if st.button('Load TFCE template'):
+            validate_output_location(state, _cache_home())
+            with st.spinner('Loading the TFCE slice template…'):
+                path = fetch_anatomical_image(template, name)
+            loaded = state['loaded_report_template'] = (selection, str(path))
         if loaded and loaded[0] == selection:
-            st.caption(f'✅ Report background ready · {Path(loaded[1]).name}')
+            st.caption(f'✅ TFCE slice template ready · {Path(loaded[1]).name}')
             return loaded[1]
-        st.caption('Click Load report template to use this image.')
     except (ImportError, OSError, RuntimeError, ValueError) as exc:
         st.warning(str(exc))
+        if st.session_state.get('wf_tfce_slice_template', 'Automatic') == 'Automatic':
+            return None
     return ''
 
 
@@ -824,8 +815,11 @@ def settings_page(state):
                           'variance_smoothing': float(smoothing), 'seed': int(seed), 'tfce_h': float(h), 'tfce_e': float(extent),
                           'tfce_c': connectivity, 'block_column': blocks_column}
     st.caption('The model includes an intercept. Image and mask preparation run sequentially. Randomise runs up to nproc maps concurrently, with contrasts within one map tested sequentially.')
-    with st.expander('Report background'):
-        state['report_reference'] = _report_background_input(state)
+    if tfce:
+        with st.expander('TFCE report slices'):
+            state['tfce_slice_template'] = _tfce_slice_template(state)
+    else:
+        state['tfce_slice_template'] = None
 
 
 def compile_plan(state, output):
@@ -880,11 +874,11 @@ def compile_plan(state, output):
         mask = mask | {'precomputed': paths}
     plan = {'version': 1, 'output_dir': str(output), 'data': plan_data, 'mask': mask, 'rows': rows, 'model': model,
             'randomise': options, 'covariates_source': state['covars_path']}
-    reference = state.get('report_reference')
+    reference = state.get('tfce_slice_template')
     if reference == '':
-        raise ValueError('Randomise settings: load the selected report background or choose Automatic.')
+        raise ValueError('Load the selected TFCE slice template in Randomise settings or choose Automatic.')
     if reference:
-        plan['report_reference'] = reference
+        plan['tfce_slice_template'] = reference
     if modality == 'MRSI' and (tissue_masks := tissue_mask_paths(state.get('tissue_masks', {}), plan_data['space'])):
         plan['tissue_masks'] = tissue_masks
     elif cached := tissue_probabilities(plan_data['space']):

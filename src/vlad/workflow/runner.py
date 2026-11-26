@@ -352,8 +352,9 @@ def validate_plan(plan):
             if metric.get('threshold') is None or not math.isfinite(float(metric['threshold'])):
                 raise ValueError(f'Enter the {metric["name"]} threshold in {metric["unit"]}.')
     source_paths = set(report_tissue_inputs(plan)[0].values())
-    if reference := plan.get('report_reference'):
-        source_paths.add(str(validate_reference_anatomy(local_nifti_path(reference))))
+    for field in ('report_reference', 'tfce_slice_template'):
+        if reference := plan.get(field):
+            source_paths.add(str(validate_reference_anatomy(local_nifti_path(reference))))
     if mask['mode'] == 'precomputed':
         validate_population_paths(mask['precomputed'], metabolites, plan['data']['space'], plan['data'].get('resolution', ''))
         source_paths.update(str(local_nifti_path(mask['precomputed'][met])) for met in metabolites)
@@ -653,7 +654,7 @@ def main(argv=None):
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--report-only', action='store_true',
                         help='Regenerate the visual HTML report for an existing completed run.')
-    parser.add_argument('--reference-anatomy', help='Background NIfTI path for a report-only run.')
+    parser.add_argument('--reference-anatomy', help='Anatomical template NIfTI for a report-only run.')
     parser.add_argument('--gm-mask', type=Path, help='Gray matter binary NIfTI for a report-only run.')
     parser.add_argument('--wm-mask', type=Path, help='White matter binary NIfTI for a report-only run.')
     args = parser.parse_args(argv)
@@ -674,6 +675,7 @@ def main(argv=None):
             from vlad.workflow.report import generate_guided_report
             if args.reference_anatomy:
                 plan['report_reference'] = args.reference_anatomy
+                plan.pop('tfce_slice_template', None)
             if args.gm_mask:
                 plan['tissue_masks'] = {'gm': str(args.gm_mask), 'wm': str(args.wm_mask)}
             output = Path(plan['output_dir'])

@@ -122,6 +122,26 @@ class NativeChooserProcessTests(unittest.TestCase):
         self.assertEqual(dialog.call_args.kwargs["initialfile"], "old.tsv")
         root.destroy.assert_called_once()
 
+    def test_macos_nifti_browse_uses_system_picker_with_the_bids_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            selected = str(Path(folder) / 'mask with spaces.nii.gz')
+            response = subprocess.CompletedProcess([], 0, json.dumps([selected]), '')
+            with (patch('vlad.gui.path_dialog.sys.platform', 'darwin'),
+                  patch('vlad.gui.path_dialog.subprocess.run', return_value=response) as run):
+                self.assertEqual(choose_path(title='Population mask', extensions=['.nii', '.nii.gz'],
+                                             default_dir=folder), [selected])
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:3], ['/usr/bin/osascript', '-l', 'JavaScript'])
+            self.assertIn('app.chooseFile', argv[4])
+            self.assertNotIn('ofType', argv[4])
+            self.assertEqual(argv[-3:], ['Population mask', folder, 'false'])
+
+    def test_macos_nifti_cancel_returns_no_paths(self):
+        response = subprocess.CompletedProcess([], 1, '', 'Error: User canceled. (-128)')
+        with (patch('vlad.gui.path_dialog.sys.platform', 'darwin'),
+              patch('vlad.gui.path_dialog.subprocess.run', return_value=response)):
+            self.assertEqual(choose_path(title='Population mask', extensions=['.nii.gz']), [])
+
     def test_timed_out_dialog_has_an_actionable_error(self):
         with patch("vlad.gui.file_picker.subprocess.run", side_effect=subprocess.TimeoutExpired("chooser", 180)):
             with self.assertRaisesRegex(RuntimeError, "Click Browse"):

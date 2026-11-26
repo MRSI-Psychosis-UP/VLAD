@@ -223,6 +223,8 @@ def generate_guided_report(plan, output, summary=None):
     validate_output_location(plan, output / 'report.html')
     assets.mkdir(exist_ok=True)
     reference = _cached_reference(plan)
+    selected_template = plan.get('tfce_slice_template')
+    tfce_template = validate_reference_anatomy(local_nifti_path(selected_template)) if selected_template else reference
     tissue_paths, probabilities = report_tissue_inputs(plan)
     views = {item['id']: item.get('view', 'raw') for item in plan['data'].get('analytes', [])}
     tissue_grids = {}
@@ -297,7 +299,7 @@ def generate_guided_report(plan, output, summary=None):
         header = image.header.copy(); header.set_data_dtype(np.uint8)
         nib.save(nib.Nifti1Image(significant.astype(np.uint8), image.affine, header), mask_path)
         slice_path = assets / f'{prefix}_slices.png'
-        _slice_figure(image, corrected_map, significant, reference, slice_path,
+        _slice_figure(image, corrected_map, significant, tfce_template if kind == 'tfce' else reference, slice_path,
                       f'{metabolite} · {contrast} · {kind} corrected p ≤ 0.05',
                       'autumn' if row_number % 2 else 'winter')
         stack_name = result.get('signal_stack', 'signals.nii.gz')
@@ -346,7 +348,8 @@ def generate_guided_report(plan, output, summary=None):
     gauge = plan.get('randomise', {}).get('gauge_correction', False) or 'gauge' in views.values()
     map_kind = 'DWI scalar maps' if dwi else 'metabolites'
     gauge_note = '' if dwi else f' · gauge correction {"enabled" if gauge else "disabled"}'
-    reference_note = str(reference) if reference else 'No cached/custom anatomy found; slice plots use Nilearn background.'
+    template_heading = 'TFCE slice template' if selected_template else 'Slice template'
+    template_note = str(tfce_template) if tfce_template else 'Nilearn default anatomy'
     empty = ('' if significant_maps else
              '<section><h2>No significant clusters</h2><p>No corrected map contained voxels '
              'with corrected p ≤ 0.05.</p></section>')
@@ -355,7 +358,7 @@ def generate_guided_report(plan, output, summary=None):
 <style>:root{{font-family:system-ui,sans-serif;color:#183448;background:#edf3f6;line-height:1.45}}body{{max-width:1300px;margin:2rem auto;padding:0 1rem}}header,section{{background:white;padding:1.4rem 1.8rem;margin:1rem 0;border-radius:9px}}h1{{font-size:1.8rem}}h2{{color:#087f8c}}.meta{{color:#526b78;font-size:.9rem}}.plot{{max-width:720px;margin:1rem auto}}img{{width:100%;height:auto}}.table-scroll{{overflow:auto}}table{{border-collapse:collapse;width:100%;font-size:.85rem}}th,td{{padding:.5rem;border-bottom:1px solid #d7e2e8;text-align:left}}th{{background:#eef5f7}}.warning{{background:#fff4d6;padding:.8rem;border-left:4px solid #d99b22}}</style></head>
 <body><header><h1>VLAD Randomise visual report</h1><p>{_escape(output)}</p>
 <p>{len(subjects)} observations · {len(plan['data']['metabolites'])} {map_kind} · {len(plan['model']['contrasts'])} contrasts{gauge_note}.</p>
-<p class="meta">Anatomical reference: {_escape(reference_note)}</p></header>
+<p class="meta">{template_heading}: {_escape(template_note)}</p></header>
 <section><h2>Model and contrasts</h2><p>Design columns: {_escape(', '.join(plan['model']['columns']))}</p>{_table(contrasts)}{encoding_note}</section>
 <section><h2>Corrected-map overview</h2>{_table(overview)}</section>{empty}{''.join(sections)}
 <section><h2>Interpretation</h2><p>FSL corrected maps store 1-p; values ≥ 0.95 are corrected p ≤ 0.05 within each map. No additional correction across metabolites or contrasts is applied.</p><p>Cluster slices show corrected significance. Extracted regional plots are post-selection descriptive summaries.</p></section>
@@ -364,7 +367,9 @@ def generate_guided_report(plan, output, summary=None):
     manifest = {'report': str(output / 'report.html'), 'assets': str(assets),
                 'significant_maps': significant_maps,
                 'generated_files': generated_files,
-                'reference': str(reference) if reference else None, 'tissue_masks': tissue_paths,
+                'reference': str(reference) if reference else None,
+                'tfce_slice_template': str(tfce_template) if selected_template else None,
+                'tissue_masks': tissue_paths,
                 'tissue_source': ('TemplateFlow' if probabilities else 'custom') if tissue_paths else None}
     (assets / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     return manifest

@@ -131,9 +131,10 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    H/E/connectivity parameters, voxelwise/uncorrected outputs,
    variance smoothing, seed and optional exchangeability blocks. Repeated
    subjects require an explicitly specified block column or selecting one visit.
-   Under **Report background**, choose **TemplateFlow** and load an anatomical
-   image, or choose **Custom NIfTI**. The background is used for corrected-map
-   overlays in the report. The population mask defines the analysis voxels.
+   Under **TFCE report slices**, choose an anatomical **TFCE slice template**
+   from TemplateFlow and click **Load TFCE template**. For Watson maps registered
+   to FMRIB58, choose `MNI152NLin6Asym_res-02_T1w`. The population mask defines
+   the analysis voxels.
    VLAD prepares images sequentially, then runs at most `nproc` metabolite-level
    Randomise processes concurrently. Contrasts inside each metabolite process
    remain sequential. Per-permutation console lines are reduced to compact GUI
@@ -158,7 +159,8 @@ The headless equivalent is `./vlad workflow --plan /path/to/plan.json`; add
 `--prepare-only` to build matrices, stacks and masks without running Randomise.
 Use `--report-only` to regenerate the visual report for an existing completed
 run without repeating permutations. Pass `--reference-anatomy /path/to/T1w.nii.gz`
-with `--report-only` to change the background. Add `--gm-mask /path/to/gm.nii.gz` and
+with `--report-only` to use an anatomical template for the regenerated slices.
+Add `--gm-mask /path/to/gm.nii.gz` and
 `--wm-mask /path/to/wm.nii.gz` together to supply tissue masks for that report.
 Each corrected map with significant voxels gets up to eight slices in each
 anatomical plane. Beneath the slices, the GM/WM histogram shows the raw
@@ -216,8 +218,8 @@ original path. Additional masks support selecting multiple files. Cancelling
 leaves the current value unchanged. There are no uploads: choosing inputs does
 not transfer or stage files, save settings, or start an analysis.
 
-The chooser opens on the **computer running VLAD**, which needs a desktop
-session and Tk (included by the native installer). For a remote/headless server
+The chooser opens on the **computer running VLAD** and needs a desktop session.
+On macOS, NIfTI **Browse** controls use the system file picker. For a remote/headless server
 or a container without desktop access, paste its paths into the editable fields.
 The command preview and explicit execution buttons work in either case.
 

@@ -1,15 +1,50 @@
-"""Run a desktop path chooser on its own Tk main thread, outside Streamlit."""
+"""Run a desktop path chooser outside Streamlit."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
+
+
+def _choose_mac_nifti(title, initial, multiple):
+    # The macOS extension filter can hide compound extensions such as .nii.gz.
+    # Open the system file dialog and let the caller validate the chosen NIfTI.
+    script = '''function run(argv) {
+    const app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+    const selected = app.chooseFile({
+        withPrompt: argv[0], defaultLocation: Path(argv[1]),
+        multipleSelectionsAllowed: argv[2] === 'true'
+    });
+    const files = Array.isArray(selected) ? selected : [selected];
+    return JSON.stringify(files.map(path => path.toString()));
+}'''
+    result = subprocess.run(['/usr/bin/osascript', '-l', 'JavaScript', '-e', script,
+                             title, str(initial), str(multiple).lower()],
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        if '(-128)' in result.stderr:
+            return []
+        raise RuntimeError(result.stderr.strip() or 'The macOS file picker could not open.')
+    return json.loads(result.stdout)
 
 
 def choose_path(*, title: str, current: str = "", kind: str = "file",
                 extensions: list[str] | None = None, multiple: bool = False,
                 allow_new: bool = False, default_dir: str = "") -> list[str]:
+    candidate = Path(current).expanduser() if current.strip() else Path.home()
+    configured = Path(default_dir).expanduser() if default_dir.strip() else None
+    initial = configured if configured is not None and configured.is_dir() else (
+        candidate if candidate.is_dir() else candidate.parent
+    )
+    while not initial.is_dir() and initial != initial.parent:
+        initial = initial.parent
+    if sys.platform == 'darwin' and kind == 'file' and any(
+            value.lower().lstrip('.') in {'nii', 'nii.gz'} for value in (extensions or ())):
+        return _choose_mac_nifti(title, initial.absolute(), multiple)
+
     import tkinter as tk
     from tkinter import filedialog
 
@@ -33,13 +68,6 @@ def choose_path(*, title: str, current: str = "", kind: str = "file",
                 root.after(100, raise_dialog, attempt + 1)
 
         root.after(100, raise_dialog)
-        candidate = Path(current).expanduser() if current.strip() else Path.home()
-        configured = Path(default_dir).expanduser() if default_dir.strip() else None
-        initial = configured if configured is not None and configured.is_dir() else (
-            candidate if candidate.is_dir() else candidate.parent
-        )
-        while not initial.is_dir() and initial != initial.parent:
-            initial = initial.parent
         options = dict(parent=root, title=title, initialdir=str(initial))
         if kind == "directory":
             selected = filedialog.askdirectory(**options, mustexist=not allow_new)

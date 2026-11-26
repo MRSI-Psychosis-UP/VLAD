@@ -153,11 +153,15 @@ class TemplateSelectionTests(unittest.TestCase):
         self.roots = patch.object(templates, "_cache_roots", return_value=[self.root])
         self.roots.start()
         self.addCleanup(self.roots.stop)
+        cache_home = patch.object(templates, '_cache_home', return_value=self.root)
+        cache_home.start()
+        self.addCleanup(cache_home.stop)
 
     def test_catalogue_and_options_never_start_a_download(self):
-        with patch.object(templates.subprocess, "run", side_effect=AssertionError("Unexpected network client")):
+        with patch('requests.get', side_effect=AssertionError('Unexpected download')):
             self.assertEqual(templates.list_templates(), ["Test"])
             self.assertEqual(templates.template_options("Test")["resolutions"], ["01", "02"])
+            self.assertEqual(templates.list_anatomical_images(), [self.first, self.second])
 
     def test_surface_density_variants_do_not_make_volume_selection_ambiguous(self):
         extra = "tpl-Test/tpl-Test_res-01_den-41k_T1w.nii.gz"
@@ -168,8 +172,22 @@ class TemplateSelectionTests(unittest.TestCase):
         path = self.root / self.first
         path.parent.mkdir()
         nib.save(nib.Nifti1Image(np.ones((2, 3, 4)), np.eye(4)), path)
-        with patch.object(templates.subprocess, "run", side_effect=AssertionError("Unexpected download")):
+        with patch('requests.get', side_effect=AssertionError('Unexpected download')):
             self.assertEqual(templates.fetch_template("Test", resolution=1), path)
+
+    def test_templateflow_fetches_exact_image_without_a_complete_cache_index(self):
+        (self.root / 'fsl').mkdir()
+        path = self.root / self.first
+        fixture = self.root / 'fixture.nii.gz'
+        nib.save(nib.Nifti1Image(np.ones((2, 3, 4)), np.eye(4)), fixture)
+        with patch('requests.get') as download:
+            response = download.return_value.__enter__.return_value
+            response.iter_content.return_value = [fixture.read_bytes()]
+            self.assertEqual(templates.fetch_anatomical_image('Test', self.first), path)
+            self.assertEqual(templates.fetch_anatomical_image('Test', self.first), path)
+            download.assert_called_once()
+            self.assertEqual(download.call_args.args[0], f'https://templateflow.s3.amazonaws.com/{self.first}')
+        self.assertEqual(path.read_bytes(), fixture.read_bytes())
 
     def test_ambiguous_selection_and_invalid_nifti_fail(self):
         with self.assertRaisesRegex(ValueError, "2 anatomical files"):
@@ -177,8 +195,12 @@ class TemplateSelectionTests(unittest.TestCase):
         path = self.root / self.first
         path.parent.mkdir()
         path.write_bytes(b"not nifti")
-        with self.assertRaisesRegex(ValueError, "not a readable NIfTI"):
-            templates.fetch_template("Test", resolution="01")
+        with patch('requests.get') as download:
+            response = download.return_value.__enter__.return_value
+            response.iter_content.return_value = [b'not nifti']
+            with self.assertRaisesRegex(RuntimeError, 'not a readable NIfTI'):
+                templates.fetch_template('Test', resolution='01')
+        self.assertEqual(list(path.parent.iterdir()), [path])
 
 
 if __name__ == "__main__":

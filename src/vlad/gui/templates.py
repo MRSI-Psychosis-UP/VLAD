@@ -9,9 +9,8 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
-import sys
 from tempfile import NamedTemporaryFile
+from urllib.parse import quote
 from urllib.request import urlopen
 import zipfile
 
@@ -20,6 +19,7 @@ from vlad.paths import project_root
 
 FSL_WM_URL = 'https://git.fmrib.ox.ac.uk/fsl/mist/-/raw/2512.2/data/masks/wm_thr75.nii.gz'
 FSL_WM_SHA256 = 'f784af57a9874ab7f129579ccf51c7b100ca118a11337c71120dfb7e5c238151'
+TEMPLATEFLOW_ARCHIVE = 'https://templateflow.s3.amazonaws.com'
 
 
 def _cache_home() -> Path:
@@ -79,6 +79,10 @@ def list_templates() -> list[str]:
     return sorted(names)
 
 
+def list_anatomical_images() -> list[str]:
+    return [name for template in list_templates() for name in _files(template)]
+
+
 def template_options(template: str) -> dict:
     files = _files(template)
     if not files:
@@ -120,42 +124,38 @@ def _cached_resource(name):
     for root in _cache_roots():
         path = root / name
         if path.is_file() and path.stat().st_size:
-            return validate_reference_anatomy(path)
+            try:
+                return validate_reference_anatomy(path)
+            except (ValueError, OSError):
+                continue
     return None
 
 
-def _fetch_resource(template, name):
+def _fetch_resource(name):
+    import requests
+
     if path := _cached_resource(name):
         return path
-    cache = _cache_home()
-    env = os.environ.copy()
-    env.update(TEMPLATEFLOW_HOME=str(cache), TEMPLATEFLOW_AUTOUPDATE="false", TEMPLATEFLOW_USE_DATALAD="false")
-    # Use a separate client process so a desktop app's imported global cache cannot
-    # redirect a browser selection into a different cache or DataLad dataset.
-    script = """import json, sys
-from templateflow import TemplateFlowClient
-query = json.loads(sys.argv[2])
-client = TemplateFlowClient(root=sys.argv[1], autoupdate=False, use_datalad=False)
-path = client.get(sys.argv[3], **query)
-print('VLAD_TEMPLATE=' + json.dumps(str(path)))
-"""
-    entity = _entities(name)
-    query = {"suffix": entity["suffix"], "desc": None, "extension": ".nii.gz" if name.endswith(".gz") else ".nii"}
-    for key, field in (("res", "resolution"), ("cohort", "cohort"), ("label", "label")):
-        if key in entity:
-            query[field] = int(entity[key]) if entity[key].isdigit() else entity[key]
+    path = _cache_home() / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = '.nii.gz' if name.endswith('.gz') else '.nii'
+    # Use the exact catalogue key. A partially populated cache may not have a
+    # placeholder for the file, and an entity query may return multiple files.
+    with NamedTemporaryFile(dir=path.parent, suffix=suffix, delete=False) as stream:
+        temporary = Path(stream.name)
     try:
-        result = subprocess.run([sys.executable, "-c", script, str(cache), json.dumps(query), template],
-                                env=env, capture_output=True, text=True, timeout=180, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"TemplateFlow could not retrieve the image: {exc}") from exc
-    lines = [line[len("VLAD_TEMPLATE="):] for line in result.stdout.splitlines() if line.startswith("VLAD_TEMPLATE=")]
-    if result.returncode or not lines:
-        raise RuntimeError("TemplateFlow could not retrieve the image. Check network access or choose a custom NIfTI path. " + result.stderr[-1500:])
-    path = Path(json.loads(lines[-1]))
-    if not path.is_file() or not path.stat().st_size:
-        raise RuntimeError("TemplateFlow did not return a nonempty NIfTI image.")
-    return validate_reference_anatomy(path)
+        with requests.get(f'{TEMPLATEFLOW_ARCHIVE}/{quote(name)}', stream=True, timeout=(10, 60)) as response:
+            response.raise_for_status()
+            with temporary.open('wb') as stream:
+                for block in response.iter_content(chunk_size=256 * 1024):
+                    stream.write(block)
+        validate_reference_anatomy(temporary)
+        temporary.replace(path)
+    except (requests.RequestException, ValueError) as exc:
+        raise RuntimeError(f'TemplateFlow could not load {path.name}: {exc}') from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path.resolve()
 
 
 def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T1w") -> Path:
@@ -174,14 +174,14 @@ def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T
         candidates.append(name)
     if len(candidates) != 1:
         raise ValueError(f"The selection matches {len(candidates)} anatomical files. Select a specific template resolution and cohort.")
-    return _fetch_resource(template, candidates[0])
+    return _fetch_resource(candidates[0])
 
 
 def fetch_anatomical_image(template: str, name: str) -> Path:
     """Fetch the exact anatomical image selected in a template catalogue."""
     if name not in _files(template):
         raise ValueError('Choose an anatomical image listed for the selected template.')
-    return _fetch_resource(template, name)
+    return _fetch_resource(name)
 
 
 def _tissue_resources(template: str) -> dict:
@@ -205,7 +205,7 @@ def tissue_probabilities(template: str, *, download=False) -> dict:
     for _, pair in sorted(pairs.items()):
         if len(pair) == 2:
             if download:
-                return {key: str(_fetch_resource(template, pair[key])) for key in ("gm", "wm")}
+                return {key: str(_fetch_resource(pair[key])) for key in ("gm", "wm")}
             cached = {key: _cached_resource(pair[key]) for key in ("gm", "wm")}
             if all(cached.values()):
                 return {key: str(path) for key, path in cached.items()}
@@ -223,7 +223,7 @@ def white_matter_probability(template: str, *, download=False) -> Path | None:
     if download:
         if not candidates:
             raise ValueError(f'TemplateFlow has no WM probability map for {template}. Choose a matching binary WM mask.')
-        return _fetch_resource(template, candidates[0])
+        return _fetch_resource(candidates[0])
     return None
 
 

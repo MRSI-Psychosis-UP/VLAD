@@ -95,6 +95,20 @@ class GuidedVisualReportTests(unittest.TestCase):
         self.assertEqual(mask_path.read_bytes(), original_mask)
         self.assertTrue((self.output / 'report.html').is_file())
 
+    def test_selected_template_is_used_for_tfce_slices_only(self):
+        from nilearn import plotting
+
+        template = self.base / 'tfce_T1w.nii.gz'
+        stat = nib.load(self.stat)
+        nib.save(nib.Nifti1Image(np.ones((11, 11, 11), dtype=np.float32), stat.affine), template)
+        voxelwise = self.stat.with_name('randomise_vox_corrp_tstat1.nii.gz')
+        nib.save(stat, voxelwise)
+        self.plan['tfce_slice_template'] = str(template)
+        with patch.object(plotting, 'plot_stat_map', wraps=plotting.plot_stat_map) as plot:
+            manifest = generate_guided_report(self.plan, self.output, [*self.summary, {**self.summary[0], 'map': str(voxelwise)}])
+        self.assertEqual([call.kwargs['bg_img'] for call in plot.call_args_list], [str(template), None])
+        self.assertEqual(manifest['tfce_slice_template'], str(template))
+
     def test_report_only_adds_tissue_histograms_to_an_existing_run(self):
         gm, wm = self.base / 'gm.nii.gz', self.base / 'wm.nii.gz'
         gm_values = np.zeros((17, 17, 17), dtype=np.uint8)
