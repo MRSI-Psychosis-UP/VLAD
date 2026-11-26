@@ -84,10 +84,15 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    at least the chosen percentage of the **final included subjects** passes.
    Supplied population masks are used directly, after binary/grid validation.
    For DWI, **Common nonzero coverage** keeps voxels that are finite and nonzero
-   in every included observation of a series. Use **Precomputed mask per DWI
-   series** when valid zero values should be included. Each series must have
-   the same grid across its observations.
-   Under **Tissue masks for report histograms**, download TemplateFlow's GM and
+   in every included observation of a series. **White matter with common
+   coverage** intersects that coverage with a white-matter mask. For Watson
+   maps labelled `space-mni`, confirm FSL MNI152 / FMRIB58 and use the cached FSL
+   mask or click **Download FSL WM mask**. For a named TemplateFlow space, VLAD
+   can download its WM probability map and threshold it at 0.5. A custom binary
+   WM NIfTI in the same space also works. VLAD samples the WM mask onto each
+   series grid with nearest-neighbour interpolation. Use **Precomputed mask per
+   DWI series** when valid zero values should be included.
+   For MRSI, under **Tissue masks for report histograms**, download TemplateFlow's GM and
    WM probability maps for the exact analysis space. VLAD reuses them from its
    local `.cache/templateflow` directory or `TEMPLATEFLOW_HOME`. A voxel is
    assigned to the more probable of GM and WM when its probability is at least

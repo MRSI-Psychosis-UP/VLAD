@@ -260,7 +260,7 @@ def generate_guided_report(plan, output, summary=None):
         match = re.search(r'tstat(\d+)', stat_path.name)
         contrast_id = match.group(1) if match else str(row_number)
         prefix = f'{row_number:03d}_{_safe(analyte_id if dwi else metabolite)}_{kind}_tstat{contrast_id}'
-        tissue_panel = '<p class="meta">GM/WM tissue maps are unavailable for this space.</p>'
+        tissue_panel = '' if dwi else '<p class="meta">GM/WM tissue maps are unavailable for this space.</p>'
         if tissue_paths:
             try:
                 t_statistics = _significant_t_statistics(stat_path, image, significant)

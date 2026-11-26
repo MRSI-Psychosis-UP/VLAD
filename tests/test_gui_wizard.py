@@ -194,6 +194,40 @@ class GuidedInterfaceTests(GuidedFixture):
             self.assertEqual(coverage[0, 0, 0], 7 / 8)
         self.assertIn('2 DWI scalar maps', (output / 'report.html').read_text())
 
+        white_matter = self.base / 'wm.nii.gz'
+        wm = np.zeros((3, 3, 3), dtype=np.uint8)
+        wm[:, 0, 0] = 1
+        nib.save(nib.Nifti1Image(wm, np.eye(4)), white_matter)
+        cached = None
+
+        def fsl_wm(*, download=False):
+            nonlocal cached
+            if download:
+                cached = white_matter
+            return cached
+
+        with patch('vlad.gui.wizard.fsl_white_matter', side_effect=fsl_wm):
+            self.page(app, 1)
+            self.assertFalse(any(button.label == 'Download TemplateFlow GM and WM' for button in app.button))
+            app.radio(key='wf_dwi_mask_mode').set_value('White matter with common coverage').run()
+            app.checkbox(key='wf_dwi_wm_fsl').set_value(True).run()
+            self.click(app, 'Download FSL WM mask')
+            self.assertTrue(any('✅ FSL MNI152 / FMRIB58 cache' in item.value for item in app.caption))
+            self.page(app, 5)
+        app.text_input(key='wf_run_name').set_value('DWI-WM').run()
+        self.click(app, 'Generate command')
+        plan = json.loads(next((self.table.parent / 'plans').glob('DWI-WM-*.json')).read_text())
+        self.assertEqual(plan['mask']['white_matter']['path'], str(white_matter))
+        self.assertIn(str(white_matter), plan['sources'])
+        output = execute(plan, prepare_only=True)
+        for analyte in plan['data']['analytes']:
+            directory = output / analyte['id']
+            expected = np.zeros(series[analyte['label']])
+            expected[1:, 0, 0] = 1
+            np.testing.assert_array_equal(nib.load(directory / 'population_mask.nii.gz').get_fdata(), expected)
+            expected[0, 0, 0] = 7 / 8
+            np.testing.assert_array_equal(nib.load(directory / 'coverage.nii.gz').get_fdata(), expected)
+
         self.page(app, 0)
         self.assertEqual(app.radio(key='wf_modality').value, 'DWI')
         self.assertEqual(next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps').value,

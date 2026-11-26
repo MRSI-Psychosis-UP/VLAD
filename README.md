@@ -119,9 +119,9 @@ The command generator has six steps:
 2. **Population mask** — use one precomputed binary mask per metabolite/ratio or
    build population masks from matching quality maps. The defaults are CRLB
    `<20`, FWHM `<0.1` and SNR `>10`, with 68% population coverage.
-   For DWI, use the common finite nonzero coverage across all included
-   observations or supply a binary mask for each series.
-   For tissue histograms, use the cached TemplateFlow maps for the matching
+   For DWI, use common finite nonzero coverage, restrict it to a downloaded
+   or custom white-matter mask, or supply a binary mask for each series.
+   For MRSI tissue histograms, use the cached TemplateFlow maps for the matching
    space, download them in this step, or supply matching binary GM and WM masks.
 3. **Model** — retain the covariate table layout and select `Include`, `Confound`
    or `Regressor` with checkboxes. A covariate cannot be both a confound and a

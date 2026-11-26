@@ -34,8 +34,6 @@ def report_tissue_inputs(plan):
         return masks, False
     if saved := plan.get('tissue_probabilities'):
         return tissue_mask_paths(saved, space), True
-    if plan['data'].get('modality') == 'DWI':
-        return {}, False
     return tissue_probabilities(space), True
 
 

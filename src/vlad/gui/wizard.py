@@ -1,6 +1,7 @@
 """A table-centred, six-step MRSI/DWI workflow."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime
 import json
 from pathlib import Path
@@ -15,7 +16,7 @@ import streamlit as st
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import filter_rows, load_contrasts, missing_covariate_values, validate_contrasts
 from vlad.gui.file_picker import path_input
-from vlad.gui.templates import _cache_home, tissue_probabilities
+from vlad.gui.templates import _cache_home, fsl_white_matter, tissue_probabilities, white_matter_probability
 from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, dwi_grouped_series_label,
                                 parse_contrast_text, read_covariates, scan_signals, scan_quality, signature,
                                 validate_output_location, validate_population_paths)
@@ -454,6 +455,34 @@ def data_page(state):
     _table(state)
 
 
+def _dwi_white_matter_input(state):
+    space = state['data']['space']
+    custom = path_input('White-matter mask (binary NIfTI)', key='wf_dwi_wm_path', extensions=('.nii', '.nii.gz'),
+                        help='Choose a white-matter mask registered to the same space as the DWI maps.').strip()
+    if custom:
+        return {'path': str(Path(custom).expanduser().resolve()), 'probability': False, 'source': 'custom'}
+    fsl = space.casefold() in {'fmrib58', 'fsl-mni-152'}
+    if space.casefold() == 'mni':
+        fsl = st.checkbox('DWI maps use FSL MNI152 / FMRIB58', key='wf_dwi_wm_fsl',
+                          help='Use this source for Watson maps registered to FMRIB58.')
+        if not fsl:
+            return {}
+    source = 'FSL MNI152 / FMRIB58' if fsl else f'TemplateFlow {space}'
+    download = st.button('Download FSL WM mask' if fsl else 'Download TemplateFlow WM map')
+    try:
+        if download:
+            validate_output_location(state, _cache_home())
+        with st.spinner(f'Finding the {source} white-matter mask…') if download else nullcontext():
+            path = fsl_white_matter(download=download) if fsl else white_matter_probability(space, download=download)
+    except (OSError, RuntimeError, ValueError) as exc:
+        st.warning(str(exc))
+        return {}
+    if path:
+        st.caption(f'✅ {source} cache · `{path.name}`')
+        return {'path': str(path), 'probability': not fsl, 'source': source}
+    return {}
+
+
 def mask_page(state):
     st.header('Population mask')
     signals = _signals(state)
@@ -461,7 +490,8 @@ def mask_page(state):
         st.info('First load the covariate table and NIfTI paths in Data.')
         return
     dwi = state['data'].get('modality') == 'DWI'
-    modes = ({'Common nonzero coverage': 'coverage', 'Precomputed mask per DWI series': 'precomputed'}
+    modes = ({'Common nonzero coverage': 'coverage', 'White matter with common coverage': 'white_matter',
+              'Precomputed mask per DWI series': 'precomputed'}
              if dwi else {'Construct from quality maps': 'quality', 'Precomputed mask per metabolite': 'precomputed'})
     choice = st.radio('Mask source', list(modes), key='wf_dwi_mask_mode' if dwi else 'wf_mask_mode', horizontal=True)
     previous = state.get('mask', {})
@@ -481,9 +511,13 @@ def mask_page(state):
             state['mask_check'] = _mask_identity(state)
             st.success('All population mask paths found. Binary values and image grids will be checked when the command runs.')
     elif dwi:
+        if mask['mode'] == 'white_matter':
+            st.caption('Keep white-matter voxels with a finite, nonzero value in every included observation.')
+            mask['white_matter'] = _dwi_white_matter_input(state)
+        else:
+            st.caption('For each DWI series, keep voxels with a finite, nonzero value in every included observation. '
+                       'Choose a precomputed mask to include valid zero-valued voxels.')
         state['mask'] = mask
-        st.caption('For each DWI series, keep voxels with a finite, nonzero value in every included observation. '
-                   'Choose a precomputed mask to include valid zero-valued voxels.')
     else:
         mask['folder'] = path_input('Quality-map folder', value=state['data']['folder'], key='wf_quality_folder', kind='directory')
         a, b = st.columns(2)
@@ -508,6 +542,9 @@ def mask_page(state):
             with st.spinner('Matching quality-map paths…'):
                 state['quality'] = scan_quality(_quality_selection(mask), signals)
         if not _quality(state): st.info('Load quality paths to check the metric filenames. Changing folder, space, resolution or metric scope requires a new check.')
+    if dwi:
+        _table(state, quality=True)
+        return
     with st.expander('Tissue masks for report histograms', expanded=True):
         space = state['data']['space']
         st.caption('VLAD uses cached TemplateFlow tissue maps for the analysis space. To override them, provide both non-overlapping binary masks in the same space.')
@@ -750,7 +787,7 @@ def compile_plan(state, output):
                      source_metabolites=signals['source_metabolites'])
     plan = {'version': 1, 'output_dir': str(output), 'data': plan_data, 'mask': mask, 'rows': rows, 'model': model,
             'randomise': options, 'covariates_source': state['covars_path']}
-    if tissue_masks := tissue_mask_paths(state.get('tissue_masks', {}), plan_data['space']):
+    if modality == 'MRSI' and (tissue_masks := tissue_mask_paths(state.get('tissue_masks', {}), plan_data['space'])):
         plan['tissue_masks'] = tissue_masks
     elif cached := tissue_probabilities(plan_data['space']):
         plan['tissue_probabilities'] = cached
@@ -822,7 +859,7 @@ def run_page(state):
                 raise ValueError('This run folder already exists. Choose a new run name to keep results intact.')
             plan = compile_plan(state, output)
             validate_output_location(plan, study_root / 'plans')
-            if not report_tissue_inputs(plan)[0]:
+            if plan['data']['modality'] == 'MRSI' and not report_tissue_inputs(plan)[0]:
                 st.warning('In Population mask, download matching TemplateFlow tissue maps or choose GM and WM mask files to include histograms.')
             study_root.mkdir(parents=True, exist_ok=True)
             (study_root / 'runs').mkdir(exist_ok=True)
