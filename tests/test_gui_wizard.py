@@ -14,7 +14,7 @@ from test_workflow_guided import GuidedFixture
 from vlad.gui.jobs import JobStore
 from vlad.gui.wizard import STEPS, _command_model_summary, _exclusive_checkbox_roles
 from vlad.workflow.core import discover_dwi_series
-from vlad.workflow.runner import execute
+from vlad.workflow.runner import execute, randomise_command
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -153,15 +153,17 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertTrue(any('Image path check pending' in item.value for item in app.caption))
         self.click(app, 'Load NIfTI paths')
         self.assertTrue(any('2/8 TSV visits have all selected DWI maps' in item.value for item in app.warning))
-        self.assertTrue(any('2 with all selected maps · 6 without a complete map match (6 included)' in item.value
+        self.assertTrue(any('2 with all selected maps · 6 without a complete map match (0 included)' in item.value
                             for item in app.caption))
+        self.assertTrue(any('2 / 8 observations included' in item.value for item in app.sidebar.caption))
         table = next(widget.value for widget in app.data_editor if 'Images found' in widget.value)
         self.assertEqual(table['Images found'].tolist().count('✅'), 2)
+        self.assertEqual(table['Status'].tolist().count('🔴 Missing NIfTI'), 6)
         self.assertFalse(table['Exclude'].any())
         app.selectbox(key='wf_filter_column').set_value('Sex')
         app.text_input(key='wf_filter_text').set_value('F').run()
         self.click(app, '+ Add filter')
-        self.assertTrue(any('4 included · 4 excluded · 2 with all selected maps · 6 without a complete map match (3 included)'
+        self.assertTrue(any('1 included · 7 excluded · 6 auto-excluded for missing NIfTIs'
                             in item.value for item in app.caption))
         self.click(app, 'Reset all filters')
         picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
@@ -228,6 +230,33 @@ class GuidedInterfaceTests(GuidedFixture):
             expected[0, 0, 0] = 7 / 8
             np.testing.assert_array_equal(nib.load(directory / 'coverage.nii.gz').get_fdata(), expected)
 
+        custom = self.base / 'custom-wm.nii'
+        values = np.where(wm, .75, .4).astype(np.float32)
+        nib.save(nib.Nifti1Image(values, np.eye(4)), custom)
+        invalid = self.base / 'four-dimensional.nii.gz'
+        nib.save(nib.Nifti1Image(values[..., None], np.eye(4)), invalid)
+        self.page(app, 1)
+        app.text_input(key='wf_dwi_wm_path').set_value(str(invalid)).run()
+        self.assertTrue(any('must be 3D' in item.value for item in app.warning))
+        self.assertFalse(app.session_state['guided_workflow']['mask']['white_matter'])
+        with patch('vlad.gui.file_picker.choose_native_paths', return_value=[str(custom)]) as chooser:
+            app.button(key='browse:wf_dwi_wm_path').click().run()
+        self.healthy(app)
+        self.assertEqual(chooser.call_args.kwargs['kind'], 'file')
+        self.assertEqual(chooser.call_args.kwargs['extensions'], ['.nii', '.nii.gz'])
+        self.assertTrue(any('✅ 3D NIfTI · 3 × 3 × 3' in item.value for item in app.caption))
+        app.radio(key='wf_dwi_wm_format').set_value('Probability map').run()
+        self.page(app, 5)
+        app.text_input(key='wf_run_name').set_value('DWI-Custom-WM').run()
+        self.click(app, 'Generate command')
+        custom_plan = json.loads(next((self.table.parent / 'plans').glob('DWI-Custom-WM-*.json')).read_text())
+        self.assertEqual(custom_plan['mask']['white_matter'], {
+            'path': str(custom), 'probability': True, 'source': 'custom'})
+        custom_output = execute(custom_plan, prepare_only=True)
+        for analyte in custom_plan['data']['analytes']:
+            mask = Path(analyte['id']) / 'population_mask.nii.gz'
+            np.testing.assert_array_equal(nib.load(custom_output / mask).get_fdata(), nib.load(output / mask).get_fdata())
+
         self.page(app, 0)
         self.assertEqual(app.radio(key='wf_modality').value, 'DWI')
         self.assertEqual(next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps').value,
@@ -289,6 +318,9 @@ class GuidedInterfaceTests(GuidedFixture):
         self.assertEqual([row['visit'] for row in matched['rows'] if row['complete']], self.visits[1:3])
         self.assertIn('2 matches', matched['rows'][0]['issues'][0])
         self.assertFalse(matched['rows'][3]['complete'])
+        table = next(widget.value for widget in app.data_editor if 'Images found' in widget.value)
+        self.assertEqual(table.loc[0, 'Status'], '🟢 Included')
+        self.assertEqual(table.loc[3, 'Status'], '🔴 Missing NIfTI')
 
     def test_default_workflow_has_six_steps_and_preserves_inputs_across_pages(self):
         app = self.app(); self.healthy(app)
@@ -522,6 +554,37 @@ class GuidedInterfaceTests(GuidedFixture):
         self.page(app, 3)
         self.assertEqual(app.dataframe[0].value['Column'].tolist(), ['Intercept', 'age', 'sex[M]', 'group[CTRL]'])
         self.assertEqual(app.dataframe[1].value.values.tolist(), [[0, 0, 0, 1], [0, 0, 0, -1]])
+
+    def test_three_group_model_generates_an_omnibus_f_only_plan(self):
+        self.frame.assign(group=['ARMS', 'CTRL', 'FEP', 'ARMS', 'CTRL', 'FEP', 'ARMS', 'FEP']).to_csv(
+            self.table, sep='\t', index=False)
+        app = self.app()
+        self.load_data(app)
+        self.page(app, 1)
+        self.click(app, 'Load quality paths')
+        self.page(app, 2)
+        workflow = app.session_state['guided_workflow']
+        editor_key = f'wf_roles_{workflow["table_id"][:12]}_{workflow.get("roles_editor_revision", 0)}'
+        app.session_state[editor_key] = {
+            'edited_rows': {0: {'Confound': True, 'Regressor': False},
+                            2: {'Include': True, 'Regressor': True}},
+            'added_rows': [], 'deleted_rows': []}
+        app.run()
+        self.page(app, 3)
+        app.radio(key='wf_contrast_mode').set_value('Omnibus ANOVA').run()
+        self.page(app, 4)
+        self.page(app, 5)
+        app.text_input(key='wf_run_name').set_value('Group-ANOVA').run()
+        self.click(app, 'Generate command')
+        plan = json.loads(next((self.table.parent / 'plans').glob('Group-ANOVA-*.json')).read_text())
+        self.assertEqual(plan['model']['contrasts'], [[0, 0, 1, 0], [0, 0, 0, 1]])
+        self.assertEqual(plan['model']['ftests'], [[1, 1]])
+        self.assertEqual(plan['model']['ftest_labels'], ['group: omnibus ANOVA'])
+        output = execute(plan, prepare_only=True)
+        self.assertEqual((output / 'design.fts').read_text().splitlines()[-1].split(), ['1', '1'])
+        argv = randomise_command(plan, plan['data']['metabolites'][0])
+        self.assertIn('--fonly', argv)
+        self.assertEqual(argv[argv.index('-f') + 1], str(output / 'design.fts'))
 
     def test_image_folder_scan_proposes_metabolite_labels(self):
         app = self.app(); self.healthy(app)

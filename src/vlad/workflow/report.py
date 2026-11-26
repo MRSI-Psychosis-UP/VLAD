@@ -112,26 +112,27 @@ def _slice_figure(image, values, significant, reference, output, title, cmap):
     display.close()
 
 
-def _significant_t_statistics(corrected_path, image, significant):
-    match = re.fullmatch(r'(.+)_(?:tfce|vox|clustere|clusterm)_corrp_(tstat\d+)\.nii(?:\.gz)?',
+def _significant_statistics(corrected_path, image, significant):
+    match = re.fullmatch(r'(.+)_(?:tfce|vox|clustere|clusterm)_corrp_([tf]stat\d+)\.nii(?:\.gz)?',
                          corrected_path.name)
     if not match:
-        raise ValueError('The corrected map filename does not identify a matching raw t-statistic map.')
+        raise ValueError('The corrected map filename does not identify a matching raw statistic map.')
     base = f'{match[1]}_{match[2]}'
+    statistic = 'F' if match[2].startswith('f') else 't'
     paths = [corrected_path.with_name(base + suffix) for suffix in ('.nii.gz', '.nii')]
     path = next((path for path in paths if path.is_file()), None)
     if path is None:
-        raise ValueError(f'The raw t-statistic map {base}.nii.gz (or .nii) is missing.')
+        raise ValueError(f'The raw {statistic}-statistic map {base}.nii.gz (or .nii) is missing.')
     stats = nib.load(path)
     if stats.shape != image.shape or not np.allclose(stats.affine, image.affine, atol=1e-4, rtol=0):
-        raise ValueError('The raw t-statistic map and corrected p-value map use different grids.')
+        raise ValueError(f'The raw {statistic}-statistic map and corrected p-value map use different grids.')
     return stats.get_fdata(dtype=np.float32)[significant]
 
 
-def _tissue_histogram(t_statistics, significant, tissues, output):
-    """Compare raw t-statistics on shared bins, normalized per tissue."""
-    finite = np.isfinite(t_statistics)
-    groups = {key: t_statistics[finite & mask[significant]] for key, mask in tissues.items()}
+def _tissue_histogram(statistics, significant, tissues, output, *, statistic='t'):
+    """Compare raw statistics on shared bins, normalized per tissue."""
+    finite = np.isfinite(statistics)
+    groups = {key: statistics[finite & mask[significant]] for key, mask in tissues.items()}
     counts = {key: len(values) for key, values in groups.items()}
     if any(counts.values()):
         edges = np.histogram_bin_edges(np.concatenate(list(groups.values())), bins=24)
@@ -144,7 +145,7 @@ def _tissue_histogram(t_statistics, significant, tissues, output):
             else:
                 ax.plot([], [], color=color, label=label)
         ax.legend(frameon=False)
-        ax.set_xlabel('Raw t-statistic')
+        ax.set_xlabel(f'Raw {statistic}-statistic')
         ax.set_ylabel('Voxels within tissue (%)')
         ax.spines[['top', 'right']].set_visible(False)
         fig.tight_layout()
@@ -257,13 +258,14 @@ def generate_guided_report(plan, output, summary=None):
             continue
         significant_maps += 1
         kind = 'tfce' if 'tfce' in stat_path.name else ('voxelwise' if 'vox' in stat_path.name else 'corrected')
-        match = re.search(r'tstat(\d+)', stat_path.name)
-        contrast_id = match.group(1) if match else str(row_number)
-        prefix = f'{row_number:03d}_{_safe(analyte_id if dwi else metabolite)}_{kind}_tstat{contrast_id}'
+        match = re.search(r'_corrp_([tf]stat\d+)\.nii', stat_path.name)
+        statistic_id = match[1] if match else f'tstat{row_number}'
+        statistic = 'F' if statistic_id.startswith('f') else 't'
+        prefix = f'{row_number:03d}_{_safe(analyte_id if dwi else metabolite)}_{kind}_{statistic_id}'
         tissue_panel = '' if dwi else '<p class="meta">GM/WM tissue maps are unavailable for this space.</p>'
         if tissue_paths:
             try:
-                t_statistics = _significant_t_statistics(stat_path, image, significant)
+                statistics = _significant_statistics(stat_path, image, significant)
             except (OSError, ValueError, nib.filebasedimages.ImageFileError) as exc:
                 tissue_panel = f'<p class="meta">GM/WM histogram unavailable. {_escape(exc)}</p>'
             else:
@@ -272,20 +274,20 @@ def generate_guided_report(plan, output, summary=None):
                     tissue_grids[grid] = align_tissue_masks(tissue_paths, image, probabilities=probabilities)
                 histogram_path = assets / f'{prefix}_tissue-histogram.svg'
                 counts, unclassified, nonfinite = _tissue_histogram(
-                    t_statistics, significant, tissue_grids[grid], histogram_path)
+                    statistics, significant, tissue_grids[grid], histogram_path, statistic=statistic)
                 if any(counts.values()):
                     generated_files.append(histogram_path.name)
                     histogram = _embedded(histogram_path, 'image/svg+xml')
                     limits = f'Outside both masks: {unclassified:,}'
                     if nonfinite:
-                        limits += f' · Nonfinite t-statistics: {nonfinite:,}'
+                        limits += f' · Nonfinite {statistic}-statistics: {nonfinite:,}'
                     tissue_panel = (
-                        '<figure class="plot"><h3>GM/WM t-statistics in significant voxels</h3>'
+                        f'<figure class="plot"><h3>GM/WM {statistic}-statistics in significant voxels</h3>'
                         f'{histogram}<figcaption class="meta">GM: {counts["gm"]:,} voxels · '
                         f'WM: {counts["wm"]:,} voxels · {limits}.</figcaption></figure>'
                     )
                 else:
-                    tissue_panel = '<p class="meta">No significant voxels have both an assigned tissue and a finite t-statistic.</p>'
+                    tissue_panel = f'<p class="meta">No significant voxels have both an assigned tissue and a finite {statistic}-statistic.</p>'
         connectivity = plan.get('randomise', {}).get('tfce_c', 26)
         clusters, _ = _cluster_rows(significant, corrected_map, image.affine, connectivity)
         mask_path = assets / f'{prefix}_significant-mask.nii.gz'

@@ -240,18 +240,19 @@ def _scan_dwi_signals(config, visits):
                          'numerator': identifier, 'denominator': [], 'components': [identifier]})
     rows = []
     for visit in visits:
-        images, issues = {}, []
+        images, issues, missing = {}, [], False
         for analyte in analytes:
             label = analyte['label']
             matches = indexed.get(label, {}).get(visit, [])
             if len(matches) != 1:
+                missing |= not matches
                 detail = '; '.join(str(path) for path in matches[:3])
                 issues.append(f'{label}: {len(matches)} matches' + (f' ({detail})' if detail else ''))
             elif issue := _dwi_header_issue(matches[0]):
                 issues.append(issue)
             else:
                 images[analyte['id']] = str(matches[0])
-        rows.append({'visit': visit, 'images': images, 'issues': issues, 'complete': not issues})
+        rows.append({'visit': visit, 'images': images, 'issues': issues, 'missing': missing, 'complete': not issues})
     return {'config': config, 'rows': rows, 'analytes': analytes,
             'source_metabolites': [item['id'] for item in analytes], 'fingerprint': signature(config)}
 
@@ -285,14 +286,15 @@ def scan_signals(config: dict, visits: list[str]) -> dict:
     index = _by_visit(index_images(config['folder']))
     rows = []
     for visit in visits:
-        images, issues = {}, []
+        images, issues, missing = {}, [], False
         for met in metabolites:
             matches = _match(index.get(visit, []), visit, config['space'], config.get('resolution', ''), config.get('desc', ''), met)
             if len(matches) == 1:
                 images[met] = matches[0]
             else:
+                missing |= not matches
                 issues.append(f'{met}: {len(matches)} matches' + (f' ({"; ".join(matches[:3])})' if matches else ''))
-        rows.append({'visit': visit, 'images': images, 'issues': issues, 'complete': not issues})
+        rows.append({'visit': visit, 'images': images, 'issues': issues, 'missing': missing, 'complete': not issues})
     return {'config': config, 'rows': rows, 'analytes': parsed['analytes'],
             'source_metabolites': metabolites, 'fingerprint': signature(config)}
 
@@ -307,7 +309,7 @@ def scan_quality(config: dict, signals: dict) -> dict:
     index = _by_visit(index_images(config['folder']))
     rows = []
     for row in signals['rows']:
-        quality, issues = {}, list(row['issues'])
+        quality, issues, missing = {}, list(row['issues']), False
         for met, signal in row['images'].items():
             quality[met] = {}
             for metric in metrics:
@@ -318,8 +320,9 @@ def scan_quality(config: dict, signals: dict) -> dict:
                 if len(matches) == 1:
                     quality[met][metric['name']] = matches[0]
                 else:
+                    missing |= not matches
                     issues.append(f'{met}/{metric["name"]}: {len(matches)} matches')
-        rows.append({'visit': row['visit'], 'quality': quality, 'issues': issues, 'complete': not issues})
+        rows.append({'visit': row['visit'], 'quality': quality, 'issues': issues, 'missing': missing, 'complete': not issues})
     return {'config': config, 'rows': rows, 'fingerprint': signature(config)}
 
 

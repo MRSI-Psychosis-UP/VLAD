@@ -21,7 +21,7 @@ from vlad.workflow.core import (build_model, discover_dwi_series, discover_metab
                                 parse_contrast_text, read_covariates, scan_signals, scan_quality, signature,
                                 validate_output_location, validate_population_paths)
 from vlad.workflow.runner import validate_plan
-from vlad.workflow.tissues import TISSUES, report_tissue_inputs, tissue_mask_paths
+from vlad.workflow.tissues import TISSUES, load_white_matter_image, report_tissue_inputs, tissue_mask_paths
 
 STEPS = ['1. Data', '2. Population mask', '3. Model', '4. Contrasts', '5. Randomise settings', '6. Command']
 METRICS = [
@@ -117,7 +117,7 @@ def _mask_identity(state):
 def _quality(state):
     result = state.get('quality')
     mask = state.get('mask', {})
-    if state.get('data', {}).get('modality') == 'DWI':
+    if mask.get('mode') != 'quality' or state.get('data', {}).get('modality') == 'DWI':
         return None
     if not _signals(state): return None
     return result if result and result['fingerprint'] == signature(_quality_selection(mask)) else None
@@ -125,8 +125,18 @@ def _quality(state):
 
 def _selection(state):
     if 'frame' not in state: raise ValueError('Load the covariates TSV in Data first.')
+    missing = {}
+    for scan, reason in ((_signals(state), 'Missing signal NIfTI'), (_quality(state), 'Missing quality NIfTI')):
+        if scan:
+            for row in scan['rows']:
+                absent = row.get('missing')
+                if absent is None:
+                    absent = any(issue.endswith(': 0 matches') for issue in row['issues'])
+                if absent:
+                    missing.setdefault(row['visit'], []).append(reason)
     return filter_rows(state['frame'], state['subject'], state['session'], filters=state.get('filters', []),
-                       excluded_rows=[index + 1 for index in state.get('excluded', [])])
+                       excluded_rows=[index + 1 for index in state.get('excluded', [])],
+                       automatic_exclusions=missing) | {'missing_nifti': missing}
 
 
 def _table_data(state, *, quality=False):
@@ -139,12 +149,14 @@ def _table_data(state, *, quality=False):
                    state.get('mask_check') == _mask_identity(state))
     selection = _selection(state)
     included = selection['audit']['included'].tolist()
+    missing = selection['missing_nifti']
     manual_exclusions = set(state.get('excluded', []))
     table = frame.copy()
     table.insert(0, 'Exclude', [index in manual_exclusions for index in range(len(frame))])
     table.insert(1, 'Status', [
-        '🔴 Excluded' if index in manual_exclusions else ('🟢 Included' if keep else '🟠 Filtered')
-        for index, keep in enumerate(included)
+        '🔴 Excluded' if index in manual_exclusions else '🔴 Missing NIfTI' if visit in missing else
+        '🟢 Included' if keep else '🟠 Filtered'
+        for index, (visit, keep) in enumerate(zip(state['visits'], included))
     ])
     table.insert(2, 'Images found', [
         '—' if signals is None else ('✅' if found.get(visit, {}).get('complete', False) else '❌')
@@ -181,6 +193,8 @@ def _table(state, *, quality=False, editable=True):
     selection = _selection(state)
     total, count = len(table), len(selection['frame'])
     summary = f'{total} observations · {count} included · {total - count} excluded'
+    if missing := selection['missing_nifti']:
+        summary += f' · {len(missing)} auto-excluded for missing NIfTIs'
     if signals:
         incomplete = {row['visit'] for row in signals['rows'] if not row['complete']}
         summary += (f' · {total - len(incomplete)} with all selected maps'
@@ -457,10 +471,20 @@ def data_page(state):
 
 def _dwi_white_matter_input(state):
     space = state['data']['space']
-    custom = path_input('White-matter mask (binary NIfTI)', key='wf_dwi_wm_path', extensions=('.nii', '.nii.gz'),
-                        help='Choose a white-matter mask registered to the same space as the DWI maps.').strip()
+    custom = path_input('Custom white-matter NIfTI', key='wf_dwi_wm_path', kind='file', extensions=('.nii', '.nii.gz'),
+                        help='Choose a 3D .nii or .nii.gz registered to the same space as the DWI maps.').strip()
     if custom:
-        return {'path': str(Path(custom).expanduser().resolve()), 'probability': False, 'source': 'custom'}
+        try:
+            path = validate_population_paths({'WM': custom}, ['WM'], space)['WM']
+            image = load_white_matter_image(path)
+        except (OSError, ValueError) as exc:
+            st.warning(str(exc))
+            return {}
+        shape = ' × '.join(map(str, image.shape))
+        st.caption(f'✅ 3D NIfTI · {shape}')
+        kind = st.radio('Custom WM values', ['Binary mask', 'Probability map'], key='wf_dwi_wm_format', horizontal=True,
+                        help='For a WM probability map with values from 0 to 1, VLAD keeps voxels at or above 0.5.')
+        return {'path': path, 'probability': kind == 'Probability map', 'source': 'custom'}
     fsl = space.casefold() in {'fmrib58', 'fsl-mni-152'}
     if space.casefold() == 'mni':
         fsl = st.checkbox('DWI maps use FSL MNI152 / FMRIB58', key='wf_dwi_wm_fsl',
@@ -575,6 +599,8 @@ def mask_page(state):
 def _model(state):
     selection = _selection(state)
     if not state.get('roles'): raise ValueError('Choose the model variables in Model first.')
+    if selection['frame'].empty:
+        raise ValueError('No observations remain after filtering and NIfTI matching.')
     model = build_model(selection['frame'], state['roles'], state.get('centre', True))
     ids = selection['audit'].loc[selection['audit']['included'], 'subject_visit'].tolist()
     model.update(subjects=ids, covariates=selection['frame'].to_dict('records'), audit=selection['audit'].to_dict('records'), roles=state['roles'])
@@ -678,10 +704,21 @@ def contrast_page(state):
     st.write('Weights follow this exact column order:')
     st.dataframe(pd.DataFrame({'Position': range(1, len(design.columns) + 1), 'Column': design.columns}), hide_index=True, width='stretch')
     identity = _contrast_identity(model)
-    if st.session_state.get('wf_contrast_mode') == 'Suggested positive / negative':
-        st.session_state['wf_contrast_mode'] = 'Suggested comparisons'
-    mode = st.radio('Contrast input', ['Suggested comparisons', 'Enter weights', 'Load contrast file'], key='wf_contrast_mode', horizontal=True)
+    modes = ['Suggested comparisons', 'Enter weights', 'Load contrast file']
+    if len(model['regressors']) > 1:
+        modes.insert(1, 'Omnibus ANOVA')
+    if st.session_state.get('wf_contrast_mode', modes[0]) not in modes:
+        st.session_state['wf_contrast_mode'] = modes[0]
+    mode = st.radio('Contrast input', modes, key='wf_contrast_mode', horizontal=True)
     labels = model['contrast_labels']; contrasts = model['contrasts']
+    if mode == 'Omnibus ANOVA':
+        weights, basis_labels = contrasts[::2], labels[::2]
+        group = next(row['Name'] for row in model['roles'] if row['Include'] and row['Regressor'])
+        state['contrasts'] = {'identity': identity, 'weights': weights, 'labels': basis_labels,
+                              'ftests': [[1] * len(weights)], 'ftest_labels': [f'{group}: omnibus ANOVA']}
+        st.caption('The F-test jointly tests the group coefficients while adjusting for the selected confounds.')
+        st.dataframe(pd.DataFrame(weights, columns=model['columns'], index=basis_labels), width='stretch')
+        return
     try:
         if mode == 'Enter weights':
             default = '\n'.join(' '.join(f'{value:g}' for value in row) for row in contrasts)
@@ -752,6 +789,8 @@ def compile_plan(state, output):
     if not contrasts or contrasts['identity'] != identity:
         raise ValueError('Contrasts: review and confirm weights for the current model.')
     model['contrasts'], model['contrast_labels'] = contrasts['weights'], contrasts['labels']
+    if 'ftests' in contrasts:
+        model['ftests'], model['ftest_labels'] = contrasts['ftests'], contrasts['ftest_labels']
     mask = state.get('mask')
     modality = state['data'].get('modality', 'MRSI')
     if not mask or mask.get('modality', 'MRSI') != modality:
@@ -913,8 +952,7 @@ def render(*, bids_dir=''):
         st.markdown('## VLAD workflow')
         st.caption('MRSI or DWI → population masks → voxelwise statistics')
         step = st.radio('Workflow', STEPS, key='wf_step', label_visibility='collapsed')
-        if 'frame' in state:
-            st.caption(f'{len(_selection(state)["frame"])} / {len(state["frame"])} observations included')
+        included_count = st.empty()
         st.caption('Paths stay on this machine. Generate the final command, then run it in a terminal.')
     index = STEPS.index(step)
     if index != len(STEPS) - 1:
@@ -930,6 +968,8 @@ def render(*, bids_dir=''):
         elif index == 3: contrast_page(state)
         elif index == 4: settings_page(state)
         else: run_page(state)
+        if 'frame' in state:
+            included_count.caption(f'{len(_selection(state)["frame"])} / {len(state["frame"])} observations included')
     except (ValueError, OSError, KeyError, TypeError) as exc:
         st.error(str(exc))
     st.divider()

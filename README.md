@@ -109,9 +109,11 @@ The command generator has six steps:
    `participant_id` and `session_id`. For MRSI, choose the derivative folder
    and match `space-`, `met-`, optional
    `desc-`, and optional `res-` filename entities. Rows can be filtered or
-   explicitly excluded. Metabolite entries may include voxelwise ratios such as
-   `Glu/GABA` and `Glu/SUMOFMETABOLITES`. A `z_` prefix requests gauge
-   correction. For example, `z_Glu GABA` tests corrected Glu and raw GABA.
+   explicitly excluded. Visits with missing signal files or required quality
+   maps are excluded automatically after path matching. Metabolite entries may
+   include voxelwise ratios such as `Glu/GABA` and `Glu/SUMOFMETABOLITES`.
+   A `z_` prefix requests gauge correction. For example, `z_Glu GABA` tests
+   corrected Glu and raw GABA.
    For DWI, choose a `dwi-preprocessing/` folder, enter the exact shared space
    (such as `mni`), click **Scan DWI folder**, and select one or more 3D scalar
    series. VLAD groups run and acquisition variants by default and counts visits
@@ -130,7 +132,8 @@ The command generator has six steps:
    to standardize it across the included observations.
 4. **Contrasts** — review the exact design-column order. Both suggested
    directions are selected by default; keep either one or both, enter custom
-   weights, or load a contrast file.
+   weights, or load a contrast file. Choose **Omnibus ANOVA** for a categorical
+   regressor with three or more included groups to test their joint effect.
 5. **Randomise settings** — choose permutations, TFCE, variance smoothing,
    corrected outputs, seed, exchangeability blocks and the number of maps
    processed concurrently.
@@ -181,7 +184,7 @@ per-map group means, z maps and audit metadata are also retained. The HTML repor
 contains up to eight slices in each anatomical plane, connected-cluster tables
 and descriptive subject-level plots for significant corrected maps. With
 matching GM and WM maps, a histogram below the slices shows the raw
-t-statistic at each voxel that passes the corrected p-value threshold. The
+t- or F-statistic at each voxel that passes the corrected p-value threshold. The
 subject-level plot summarizes each included subject/session's mean signal
 across those significant voxels.
 

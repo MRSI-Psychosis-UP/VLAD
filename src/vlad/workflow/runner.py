@@ -24,7 +24,7 @@ from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import _vest, validate_contrasts
 from vlad.workflow.core import NATIVE_SPACES, validate_output_location, validate_population_paths
 from vlad.workflow.gauge import correct_map_voxelwise, gauge_from_group_means
-from vlad.workflow.tissues import align_tissue_masks, align_white_matter, report_tissue_inputs
+from vlad.workflow.tissues import align_tissue_masks, align_white_matter, load_white_matter_image, report_tissue_inputs
 
 
 PROGRESS_PREFIX = 'VLAD_PROGRESS '
@@ -161,6 +161,8 @@ def randomise_command(plan, metabolite, executable='randomise'):
     argv = [executable, '-i', str(directory / input_stack), '-o', str(directory / 'randomise'),
             '-m', str(directory / 'population_mask.nii.gz'), '-d', str(Path(plan['output_dir']) / 'design.mat'),
             '-t', str(Path(plan['output_dir']) / 'design.con'), '-n', str(settings['permutations'])]
+    if plan['model'].get('ftests'):
+        argv += ['-f', str(Path(plan['output_dir']) / 'design.fts'), '--fonly']
     if settings.get('tfce', True):
         argv += ['-T', f"--tfce_H={settings.get('tfce_h', 2.)}", f"--tfce_E={settings.get('tfce_e', .5)}",
                  f"--tfce_C={settings.get('tfce_c', 6)}"]
@@ -215,18 +217,23 @@ def _run_randomise(command, *, environment, metabolite, permutations, contrasts)
                    f'{contrasts} contrast(s) completed sequentially')
 
 
+def _statistic_outputs(model):
+    return ('fstat', model['ftest_labels']) if model.get('ftests') else ('tstat', model['contrast_labels'])
+
+
 def _analyse_metabolite(plan, metabolite, executable, environment):
     """Run one metabolite; its contrasts remain sequential inside Randomise."""
     analyte = _analyte(plan, metabolite)
     command = randomise_command(plan, metabolite, executable)
+    statistic, labels = _statistic_outputs(plan['model'])
     _run_randomise(command, environment=environment, metabolite=analyte['label'],
                    permutations=plan['randomise']['permutations'],
-                   contrasts=len(plan['model']['contrasts']))
+                   contrasts=len(labels))
     directory = Path(plan['output_dir']) / metabolite
     population = nib.load(directory / 'population_mask.nii.gz').get_fdata()
     summary = []
-    for number, label in enumerate(plan['model']['contrast_labels'], 1):
-        for pmap in sorted(directory.glob(f'randomise*corrp_tstat{number}.nii.gz')):
+    for number, label in enumerate(labels, 1):
+        for pmap in sorted(directory.glob(f'randomise*corrp_{statistic}{number}.nii.gz')):
             values = nib.load(pmap).get_fdata()
             summary.append({'metabolite': analyte['label'], 'analyte': metabolite,
                             'contrast': label, 'map': str(pmap), 'signal_stack': _analysis_stack_name(plan, metabolite),
@@ -282,7 +289,19 @@ def validate_plan(plan):
     if (len(design) != len(rows) or len(design) <= len(design.columns) or not np.isfinite(design).all().all()
             or np.linalg.matrix_rank(design.to_numpy()) != len(design.columns)):
         raise ValueError('The model must be finite, full rank and have residual degrees of freedom.')
-    validate_contrasts(model['contrasts'], design, model['contrast_labels'])
+    t_contrasts, _ = validate_contrasts(model['contrasts'], design, model['contrast_labels'])
+    if 'ftests' in model:
+        ftests = np.asarray(model['ftests'], dtype=float)
+        labels = model.get('ftest_labels', [])
+        if (ftests.ndim != 2 or not len(ftests) or ftests.shape[1] != len(t_contrasts)
+                or not np.isin(ftests, (0, 1)).all() or len(labels) != len(ftests)
+                or any(not isinstance(label, str) or not label.strip() for label in labels)
+                or len(set(labels)) != len(labels)):
+            raise ValueError('F-tests need distinct labels and a 0/1 row selecting the relevant t-contrasts for each test.')
+        for row in ftests:
+            selected = t_contrasts[row.astype(bool)]
+            if not len(selected) or np.linalg.matrix_rank(selected) != len(selected):
+                raise ValueError('Each F-test needs independent contrast rows.')
     options = plan['randomise']
     nperm = options['permutations']
     if not isinstance(nperm, int) or nperm < 0: raise ValueError('Permutations must be a nonnegative integer (0 means exhaustive).')
@@ -336,8 +355,10 @@ def validate_plan(plan):
     if mask['mode'] == 'white_matter':
         wm = mask.get('white_matter', {})
         if not wm.get('path') or not isinstance(wm.get('probability'), bool):
-            raise ValueError('Population mask: download a matching white-matter map or choose a binary WM NIfTI.')
-        source_paths.update(validate_population_paths({'WM': wm['path']}, ['WM'], plan['data']['space']).values())
+            raise ValueError('Population mask: choose a 3D white-matter NIfTI or download a matching WM map.')
+        wm_path = validate_population_paths({'WM': wm['path']}, ['WM'], plan['data']['space'])['WM']
+        load_white_matter_image(wm_path)
+        source_paths.add(wm_path)
     for row in rows:
         for analyte in analytes:
             for met in analyte['components']:
@@ -483,6 +504,8 @@ def execute(plan, *, prepare_only=False):
     model, mask = plan['model'], plan['mask']
     atomic_text(output / 'design.mat', _vest(np.asarray(model['matrix'])))
     atomic_text(output / 'design.con', _vest(np.asarray(model['contrasts']), 'NumContrasts'))
+    if model.get('ftests'):
+        atomic_text(output / 'design.fts', _vest(np.asarray(model['ftests']), 'NumContrasts'))
     atomic_text(output / 'subjects.txt', '\n'.join(model['subjects']) + '\n')
     pd.DataFrame(model['matrix'], columns=model['columns']).to_csv(output / 'design.tsv', sep='\t', index=False)
     pd.DataFrame(model.get('covariates', [])).to_csv(output / 'covariates.tsv', sep='\t', index=False)
@@ -583,33 +606,34 @@ def execute(plan, *, prepare_only=False):
         _emit('Computing voxelwise gauge correction across selected metabolites.')
         _apply_gauge_correction(plan, reference, gauge_group_means)
     summary = []
+    _, result_labels = _statistic_outputs(model)
     if not prepare_only:
         metabolites = plan['data']['metabolites']
         display_labels = [item['label'] for item in analytes]
         workers = min(plan['randomise'].get('nproc', 1), len(metabolites))
         _emit(f'Running Randomise for {len(metabolites)} {modality} map(s) with {workers} concurrent process(es); contrasts within each map are sequential.')
         if not sys.stdout.isatty():
-            total = (plan['randomise']['permutations'] * len(plan['model']['contrasts'])
+            total = (plan['randomise']['permutations'] * len(result_labels)
                      if plan['randomise']['permutations'] > 0 else None)
             for label in display_labels:
                 _emit_progress(label, 'Queued for Randomise', 0, total,
                                'Waiting for worker')
         with _metabolite_progress(display_labels, plan['randomise']['permutations'],
-                                  len(plan['model']['contrasts'])):
+                                  len(result_labels)):
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='vlad-metabolite') as pool:
                 futures = {pool.submit(_analyse_metabolite, plan, met, executable, environment): met
                            for met in metabolites}
                 for future in as_completed(futures):
                     summary.extend(future.result())
         metabolite_order = {name: index for index, name in enumerate(metabolites)}
-        contrast_order = {name: index for index, name in enumerate(model['contrast_labels'])}
+        contrast_order = {name: index for index, name in enumerate(result_labels)}
         summary.sort(key=lambda row: (metabolite_order[row.get('analyte', row['metabolite'])],
                                       contrast_order[row['contrast']], row['map']))
     pd.DataFrame(summary).to_csv(output / 'results.tsv', sep='\t', index=False)
     gauge_note = ('Gauge-corrected stacks were generated for z-prefixed outputs; unprefixed metabolite and ratio analyses use raw stacks.'
                   if gauge_enabled else 'Gauge correction was not applied.')
     atomic_text(output / 'results.json', json.dumps({'status': 'prepared' if prepare_only else 'succeeded', 'results': summary, 'modality': modality,
-                'output_dir': str(output), 'model_columns': model['columns'], 'contrast_labels': model['contrast_labels'],
+                'output_dir': str(output), 'model_columns': model['columns'], 'contrast_labels': result_labels,
                 'gauge_correction': {'enabled': gauge_enabled,
                                      'term': str(output / 'gauge_term.nii.gz') if gauge_enabled else None},
                 'note': gauge_note + ' FSL corrected maps contain 1-p; values >= 0.95 represent corrected p <= 0.05 within each map. Correction across metabolites or contrasts is not applied.'}, indent=2))

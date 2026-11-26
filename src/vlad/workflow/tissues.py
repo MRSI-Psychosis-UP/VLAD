@@ -47,6 +47,11 @@ def _load_tissue(path, label):
     return image
 
 
+def load_white_matter_image(path):
+    """Read the header of a 3D white-matter NIfTI."""
+    return _load_tissue(Path(path).expanduser(), TISSUES['wm'])
+
+
 def _align_binary(data, image, reference):
     if image.shape != reference.shape or not np.allclose(image.affine, reference.affine, atol=1e-4, rtol=0):
         binary = nib.Nifti1Image(data.astype(np.uint8), image.affine)
@@ -56,7 +61,7 @@ def _align_binary(data, image, reference):
 
 def align_white_matter(path, reference, *, probability=False):
     """Binarize a WM probability map or sample a binary WM mask on the DWI grid."""
-    image = _load_tissue(Path(path).expanduser(), TISSUES['wm'])
+    image = load_white_matter_image(path)
     values = image.get_fdata(dtype=np.float32)
     if probability:
         if not np.isfinite(values).all() or values.min() < 0 or values.max() > 1:

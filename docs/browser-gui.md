@@ -64,9 +64,11 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    a scan.
    The picker shows unique matches in the loaded TSV and the total visits in the
    folder. **Load NIfTI paths** checks the files and shows how many TSV visits
-   have every selected series. A visit with multiple candidates for a series is
-   marked ambiguous. Four-dimensional diffusion acquisitions and subject-native
-   group analyses are rejected.
+   have every selected series. VLAD automatically excludes visits with missing
+   signal files or missing required quality maps and records the reason in
+   `selection.tsv`. Reload paths after making the files available to restore
+   eligible visits. Resolve ambiguous matches in Data. Four-dimensional
+   diffusion acquisitions and subject-native group analyses are rejected.
 
    Use **+ Add filter** to stack categorical
    or numeric covariate rules; active filters combine with AND and can be removed
@@ -88,8 +90,10 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    coverage** intersects that coverage with a white-matter mask. For Watson
    maps labelled `space-mni`, confirm FSL MNI152 / FMRIB58 and use the cached FSL
    mask or click **Download FSL WM mask**. For a named TemplateFlow space, VLAD
-   can download its WM probability map and threshold it at 0.5. A custom binary
-   WM NIfTI in the same space also works. VLAD samples the WM mask onto each
+   can download its WM probability map and threshold it at 0.5. **Custom
+   white-matter NIfTI** accepts 3D `.nii` and `.nii.gz` files in the same space.
+   Select **Binary mask** for 0/1 values or **Probability map** to apply the
+   same 0.5 cutoff. VLAD samples the WM mask onto each
    series grid with nearest-neighbour interpolation. Use **Precomputed mask per
    DWI series** when valid zero values should be included.
    For MRSI, under **Tissue masks for report histograms**, download TemplateFlow's GM and
@@ -117,7 +121,10 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    effects; multiple rows run separate directional tests. Suggested categorical labels state the actual comparison
    and reference, such as `Sex: M > F` and `Sex: M < F`; binary numeric coding
    similarly uses `Sex: 1 > 0`. Continuous variables use `slope > 0` and
-   `slope < 0`. Changed model coding requires reviewing the contrasts.
+   `slope < 0`. For a categorical regressor with three or more included groups,
+   **Omnibus ANOVA** runs one F-test of equality across groups, adjusted for any
+   selected confounds. VLAD writes `design.fts` and reports corrected F-statistic
+   results. Changed model coding requires reviewing the contrasts.
 5. **Randomise settings** — set permutations (5000 by default; 0 is exhaustive),
    concurrent maps (`nproc`, 4 by default), TFCE and its
    H/E/connectivity parameters, voxelwise/uncorrected outputs,
@@ -150,7 +157,7 @@ run without repeating permutations. Add `--gm-mask /path/to/gm.nii.gz` and
 `--wm-mask /path/to/wm.nii.gz` together to supply tissue masks for that report.
 Each corrected map with significant voxels gets up to eight slices in each
 anatomical plane. Beneath the slices, the GM/WM histogram shows the raw
-t-statistics for voxels with corrected p ≤ 0.05 in that result. The two
+t- or F-statistics for voxels with corrected p ≤ 0.05 in that result. The two
 tissues share bins, with heights shown as percentages within each tissue.
 The subject-level plot shows one point per included subject/session, averaged
 across the same significant voxels.

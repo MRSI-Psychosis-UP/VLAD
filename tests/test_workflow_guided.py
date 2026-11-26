@@ -243,9 +243,21 @@ class GuidedWorkflowTests(GuidedFixture):
         state = self.state(); state['roles'][1]['Include'] = False
         with self.assertRaisesRegex(ValueError, 'review and confirm'): compile_plan(state, self.base / 'output')
         state = self.state()
-        state['signals']['rows'][0].update(complete=False, issues=['water: 0 matches'])
-        with self.assertRaisesRegex(ValueError, 'water: 0 matches'):
+        state['signals']['rows'][0].update(complete=False, issues=['water: 2 matches'])
+        with self.assertRaisesRegex(ValueError, 'water: 2 matches'):
             compile_plan(state, self.base / 'output')
+
+    def test_missing_signal_and_required_quality_maps_are_excluded_in_plan(self):
+        state = self.state()
+        Path(state['signals']['rows'][0]['images']['NAA']).unlink()
+        Path(state['quality']['rows'][1]['quality']['CrPCr']['crlb']).unlink()
+        state['signals'] = scan_signals(state['data'], self.visits)
+        state['quality'] = scan_quality(state['quality']['config'], state['signals'])
+        plan = compile_plan(state, self.base / 'output')
+        self.assertEqual(plan['model']['subjects'], self.visits[2:])
+        self.assertEqual([row['visit'] for row in plan['rows']], self.visits[2:])
+        self.assertEqual([row['reason'] for row in plan['model']['audit'][:2]],
+                         ['Missing signal NIfTI', 'Missing quality NIfTI'])
 
     def test_population_threshold_uses_at_least_and_final_included_subjects(self):
         np.testing.assert_array_equal(population_mask([[1, 1], [1, 0]], 50), [1, 1])

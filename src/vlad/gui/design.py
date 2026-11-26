@@ -90,7 +90,7 @@ def missing_covariate_values(series: pd.Series) -> pd.Series:
 def filter_rows(frame: pd.DataFrame, subject_column: str, visit_column: str | None = None,
                 filters: list[dict] | None = None, include_subjects: list[str] | None = None,
                 exclude_subjects: list[str] | None = None,
-                excluded_rows: list[int] | None = None) -> dict:
+                excluded_rows: list[int] | None = None, *, automatic_exclusions: dict[str, list[str]] | None = None) -> dict:
     """Select observations in source order and explain every discarded data row.
 
     Filter rules are combined with AND. Inclusion/exclusion tokens can identify
@@ -184,6 +184,9 @@ def filter_rows(frame: pd.DataFrame, subject_column: str, visit_column: str | No
         raise DesignError("Excluded row numbers must identify one-based rows of the covariate table.")
     for row in rows:
         reasons[row - 1].append("Manually excluded data row")
+    if automatic_exclusions:
+        for label, row_reasons in zip(labels, reasons):
+            row_reasons.extend(automatic_exclusions.get(label, ()))
     keep = np.asarray([not reason for reason in reasons], dtype=bool)
     audit = pd.DataFrame({"row": np.arange(1, count + 1), "subject_visit": labels,
                           "included": keep, "reason": ["; ".join(reason) for reason in reasons]})
