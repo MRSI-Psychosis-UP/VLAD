@@ -275,16 +275,21 @@ class GuidedWorkflowTests(GuidedFixture):
         self.assertEqual((self.base / 'output/subjects.txt').read_text().splitlines(), plan['model']['subjects'])
 
     def test_precomputed_masks_are_per_metabolite_and_binary(self):
-        state = self.state(); mapping = {}
+        state = self.state(); mapping = {}; paths = {}
         for i, met in enumerate(self.data['metabolites']):
             values = np.zeros((2, 2, 2)); values[i, :, :] = 1
             path = self.base / f'met-{met}_mask.nii.gz'
-            nib.save(nib.Nifti1Image(values, np.eye(4)), path); mapping[met] = str(path)
+            nib.save(nib.Nifti1Image(values, np.eye(4)), path)
+            path = path.rename(path.with_suffix('').with_suffix('.NII.GZ'))
+            paths[met] = str(path)
+            mapping[met] = path.as_uri() if i == 0 else f'"{path}"'
         state['mask'] = {'mode': 'precomputed', 'precomputed': mapping, 'coverage': 68.}
         state['mask_check'] = _mask_identity(state)
         plan = compile_plan(state, self.base / 'output'); execute(plan, prepare_only=True)
+        self.assertEqual(plan['mask']['precomputed'], paths)
         for met in self.data['metabolites']:
-            np.testing.assert_array_equal(nib.load(self.base / f'output/{met}/population_mask.nii.gz').get_fdata(), nib.load(mapping[met]).get_fdata())
+            np.testing.assert_array_equal(nib.load(self.base / f'output/{met}/population_mask.nii.gz').get_fdata(),
+                                          nib.load(paths[met]).get_fdata())
 
     def test_grid_mismatch_and_source_changes_fail(self):
         plan = self.plan()

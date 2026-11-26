@@ -37,19 +37,20 @@ def report_tissue_inputs(plan):
     return tissue_probabilities(space), True
 
 
-def _load_tissue(path, label):
+def load_mask_image(path, label):
+    """Read a 3D mask header and validate its affine."""
     try:
         image = nib.load(path)
     except nib.filebasedimages.ImageFileError as exc:
         raise ValueError(f'{label}: unable to read NIfTI mask {path}.') from exc
     if len(image.shape) != 3 or not np.isfinite(image.affine).all() or np.linalg.matrix_rank(image.affine[:3, :3]) != 3:
-        raise ValueError(f'{label}: the tissue image must be 3D with a valid affine.')
+        raise ValueError(f'{label}: the mask must be 3D with a valid affine.')
     return image
 
 
 def load_white_matter_image(path):
     """Read the header of a 3D white-matter NIfTI."""
-    return _load_tissue(Path(path).expanduser(), TISSUES['wm'])
+    return load_mask_image(Path(path).expanduser(), TISSUES['wm'])
 
 
 def _align_binary(data, image, reference):
@@ -77,7 +78,7 @@ def align_white_matter(path, reference, *, probability=False):
 
 def align_tissue_masks(paths, reference, *, probabilities=False):
     """Sample binary masks on the reference grid using their existing affines."""
-    images = {key: _load_tissue(path, TISSUES[key]) for key, path in paths.items()}
+    images = {key: load_mask_image(path, TISSUES[key]) for key, path in paths.items()}
     values = {key: image.get_fdata(dtype=np.float32) for key, image in images.items()}
     if probabilities:
         gm, wm = images['gm'], images['wm']

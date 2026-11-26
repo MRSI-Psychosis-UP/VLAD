@@ -92,6 +92,7 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    mask or click **Download FSL WM mask**. For a named TemplateFlow space, VLAD
    can download its WM probability map and threshold it at 0.5. **Custom
    white-matter NIfTI** accepts 3D `.nii` and `.nii.gz` files in the same space.
+   Browse for a file or paste its local path, including quoted paths and `file://` URLs.
    Select **Binary mask** for 0/1 values or **Probability map** to apply the
    same 0.5 cutoff. VLAD samples the WM mask onto each
    series grid with nearest-neighbour interpolation. Use **Precomputed mask per
@@ -130,6 +131,9 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    H/E/connectivity parameters, voxelwise/uncorrected outputs,
    variance smoothing, seed and optional exchangeability blocks. Repeated
    subjects require an explicitly specified block column or selecting one visit.
+   Under **Report background**, choose **TemplateFlow** and load an anatomical
+   image, or choose **Custom NIfTI**. The background is used for corrected-map
+   overlays in the report. The population mask defines the analysis voxels.
    VLAD prepares images sequentially, then runs at most `nproc` metabolite-level
    Randomise processes concurrently. Contrasts inside each metabolite process
    remain sequential. Per-permutation console lines are reduced to compact GUI
@@ -153,7 +157,8 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
 The headless equivalent is `./vlad workflow --plan /path/to/plan.json`; add
 `--prepare-only` to build matrices, stacks and masks without running Randomise.
 Use `--report-only` to regenerate the visual report for an existing completed
-run without repeating permutations. Add `--gm-mask /path/to/gm.nii.gz` and
+run without repeating permutations. Pass `--reference-anatomy /path/to/T1w.nii.gz`
+with `--report-only` to change the background. Add `--gm-mask /path/to/gm.nii.gz` and
 `--wm-mask /path/to/wm.nii.gz` together to supply tissue masks for that report.
 Each corrected map with significant voxels gets up to eight slices in each
 anatomical plane. Beneath the slices, the GM/WM histogram shows the raw

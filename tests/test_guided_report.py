@@ -80,9 +80,19 @@ class GuidedVisualReportTests(unittest.TestCase):
         self.assertEqual(len(list(assets.glob('*_significant-mask.nii.gz'))), 1)
 
     def test_report_only_cli_regenerates_an_existing_run(self):
+        from nilearn import plotting
+
         plan_path = self.base / 'plan.json'
         plan_path.write_text(json.dumps(self.plan))
-        self.assertEqual(workflow_main(['--plan', str(plan_path), '--report-only']), 0)
+        background = self.base / 'report background.nii.gz'
+        nib.save(nib.Nifti1Image(np.ones((11, 11, 11), dtype=np.float32), nib.load(self.stat).affine), background)
+        mask_path = self.output / 'NAA' / 'population_mask.nii.gz'
+        original_mask = mask_path.read_bytes()
+        with patch.object(plotting, 'plot_stat_map', wraps=plotting.plot_stat_map) as plot:
+            self.assertEqual(workflow_main(['--plan', str(plan_path), '--report-only',
+                                            '--reference-anatomy', background.as_uri()]), 0)
+        self.assertEqual(plot.call_args.kwargs['bg_img'], str(background))
+        self.assertEqual(mask_path.read_bytes(), original_mask)
         self.assertTrue((self.output / 'report.html').is_file())
 
     def test_report_only_adds_tissue_histograms_to_an_existing_run(self):

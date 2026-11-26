@@ -20,7 +20,8 @@ import numpy as np
 import pandas as pd
 from scipy import ndimage
 
-from vlad.workflow.core import validate_output_location
+from vlad.gui.templates import validate_reference_anatomy
+from vlad.workflow.core import local_nifti_path, validate_output_location
 from vlad.workflow.tissues import TISSUES, align_tissue_masks, report_tissue_inputs
 
 
@@ -51,6 +52,8 @@ def _safe(value):
 
 
 def _cached_reference(plan):
+    if reference := plan.get('report_reference'):
+        return validate_reference_anatomy(local_nifti_path(reference))
     custom = plan.get('data', {}).get('reference_anatomy')
     if custom and Path(custom).is_file():
         return Path(custom)

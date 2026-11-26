@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 import nibabel as nib
 import numpy as np
@@ -326,18 +328,38 @@ def scan_quality(config: dict, signals: dict) -> dict:
     return {'config': config, 'rows': rows, 'fingerprint': signature(config)}
 
 
+def local_nifti_path(value) -> Path:
+    """Accept a path copied from the file manager or a quoted shell argument."""
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] in {'"', "'"} and text[-1] == text[0]:
+        text = text[1:-1]
+    if text.lower().startswith('file:'):
+        uri = urlsplit(text)
+        if uri.netloc.lower() not in {'', 'localhost'} or uri.query or uri.fragment:
+            raise ValueError('Use a local file path or a local file URI for the NIfTI.')
+        text = url2pathname(uri.path)
+    return Path(text).expanduser()
+
+
+def validate_mask_path(value, label, space, resolution='', metabolite='') -> str:
+    path = local_nifti_path(value)
+    if not path.is_file():
+        raise ValueError(f'{label}: choose an existing mask file ({path}).')
+    if not path.name.lower().endswith(('.nii', '.nii.gz')):
+        raise ValueError(f'{label}: choose a NIfTI mask ending in .nii or .nii.gz ({path.name}).')
+    entities = image_entities(path).entities
+    for key, expected in [('space', space), ('res', resolution), ('met', metabolite)]:
+        declared = entities.get(key)
+        if key == 'space' and declared and expected and declared.casefold() == expected.casefold():
+            continue
+        if expected and declared and declared != expected:
+            raise ValueError(f'{label}: {path.name} declares {key}-{declared}, expected {key}-{expected}.')
+    # Keep the chosen filename for its BIDS labels even when it is a symlink.
+    return str(path.absolute())
+
+
 def validate_population_paths(mapping, metabolites, space, resolution='') -> dict:
-    result = {}
-    for met in metabolites:
-        path = Path(mapping.get(met, '')).expanduser()
-        if not path.is_file() or not path.name.endswith(('.nii', '.nii.gz')):
-            raise ValueError(f'{met}: choose an existing population-mask NIfTI.')
-        entities = image_entities(path).entities
-        for key, expected in [('space', space), ('res', resolution), ('met', met)]:
-            if expected and entities.get(key) and entities[key] != expected:
-                raise ValueError(f'{met}: mask filename has a different {key}- label.')
-        result[met] = str(path.resolve())
-    return result
+    return {met: validate_mask_path(mapping.get(met, ''), met, space, resolution, met) for met in metabolites}
 
 
 def build_model(frame: pd.DataFrame, roles: list[dict], centre=True) -> dict:

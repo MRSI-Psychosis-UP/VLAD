@@ -230,7 +230,7 @@ class GuidedInterfaceTests(GuidedFixture):
             expected[0, 0, 0] = 7 / 8
             np.testing.assert_array_equal(nib.load(directory / 'coverage.nii.gz').get_fdata(), expected)
 
-        custom = self.base / 'custom-wm.nii'
+        custom = self.base / 'custom mask_space-MNI_label-WM_probseg.nii'
         values = np.where(wm, .75, .4).astype(np.float32)
         nib.save(nib.Nifti1Image(values, np.eye(4)), custom)
         invalid = self.base / 'four-dimensional.nii.gz'
@@ -243,16 +243,32 @@ class GuidedInterfaceTests(GuidedFixture):
             app.button(key='browse:wf_dwi_wm_path').click().run()
         self.healthy(app)
         self.assertEqual(chooser.call_args.kwargs['kind'], 'file')
-        self.assertEqual(chooser.call_args.kwargs['extensions'], ['.nii', '.nii.gz'])
+        self.assertEqual(chooser.call_args.kwargs['extensions'], ['.nii', '.nii.gz', '.NII', '.NII.GZ'])
+        self.assertTrue(any('✅ 3D NIfTI · 3 × 3 × 3' in item.value for item in app.caption))
+        app.text_input(key='wf_dwi_wm_path').set_value(custom.as_uri()).run()
         self.assertTrue(any('✅ 3D NIfTI · 3 × 3 × 3' in item.value for item in app.caption))
         app.radio(key='wf_dwi_wm_format').set_value('Probability map').run()
+        self.page(app, 4)
+        reference = self.base / 'report_T1w.nii.gz'
+        nib.save(nib.Nifti1Image(np.ones((5, 5, 5), dtype=np.float32), np.eye(4)), reference)
+        resource = 'tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_T1w.nii.gz'
+        with (patch('vlad.gui.wizard.list_templates', return_value=['MNI152NLin6Asym']),
+              patch('vlad.gui.wizard.template_options', return_value={'files': [resource]}),
+              patch('vlad.gui.wizard.fetch_anatomical_image', return_value=reference) as fetch):
+            app.radio(key='wf_report_background_source').set_value('TemplateFlow').run()
+            fetch.assert_not_called()
+            self.click(app, 'Load report template')
+            fetch.assert_called_once_with('MNI152NLin6Asym', resource)
         self.page(app, 5)
         app.text_input(key='wf_run_name').set_value('DWI-Custom-WM').run()
         self.click(app, 'Generate command')
         custom_plan = json.loads(next((self.table.parent / 'plans').glob('DWI-Custom-WM-*.json')).read_text())
         self.assertEqual(custom_plan['mask']['white_matter'], {
             'path': str(custom), 'probability': True, 'source': 'custom'})
+        self.assertEqual(custom_plan['report_reference'], str(reference))
         custom_output = execute(custom_plan, prepare_only=True)
+        manifest = json.loads((custom_output / 'report_assets/manifest.json').read_text())
+        self.assertEqual(manifest['reference'], str(reference))
         for analyte in custom_plan['data']['analytes']:
             mask = Path(analyte['id']) / 'population_mask.nii.gz'
             np.testing.assert_array_equal(nib.load(custom_output / mask).get_fdata(), nib.load(output / mask).get_fdata())

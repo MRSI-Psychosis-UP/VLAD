@@ -16,14 +16,17 @@ import streamlit as st
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import filter_rows, load_contrasts, missing_covariate_values, validate_contrasts
 from vlad.gui.file_picker import path_input
-from vlad.gui.templates import _cache_home, fsl_white_matter, tissue_probabilities, white_matter_probability
-from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, dwi_grouped_series_label,
+from vlad.gui.templates import (_cache_home, fetch_anatomical_image, fsl_white_matter, list_templates,
+                                template_options, tissue_probabilities, validate_reference_anatomy,
+                                white_matter_probability)
+from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, dwi_grouped_series_label, local_nifti_path,
                                 parse_contrast_text, read_covariates, scan_signals, scan_quality, signature,
-                                validate_output_location, validate_population_paths)
+                                validate_mask_path, validate_output_location, validate_population_paths)
 from vlad.workflow.runner import validate_plan
-from vlad.workflow.tissues import TISSUES, load_white_matter_image, report_tissue_inputs, tissue_mask_paths
+from vlad.workflow.tissues import TISSUES, load_mask_image, load_white_matter_image, report_tissue_inputs, tissue_mask_paths
 
 STEPS = ['1. Data', '2. Population mask', '3. Model', '4. Contrasts', '5. Randomise settings', '6. Command']
+NIFTI_EXTENSIONS = ('.nii', '.nii.gz', '.NII', '.NII.GZ')
 METRICS = [
     {'name': 'snr', 'desc': 'snr', 'scope': 'Global', 'unit': 'unitless', 'operator': '>', 'threshold': 10.},
     {'name': 'fwhm', 'desc': 'fwhm', 'scope': 'Global', 'unit': 'Hz', 'operator': '<', 'threshold': .1},
@@ -471,11 +474,11 @@ def data_page(state):
 
 def _dwi_white_matter_input(state):
     space = state['data']['space']
-    custom = path_input('Custom white-matter NIfTI', key='wf_dwi_wm_path', kind='file', extensions=('.nii', '.nii.gz'),
+    custom = path_input('Custom white-matter NIfTI', key='wf_dwi_wm_path', kind='file', extensions=NIFTI_EXTENSIONS,
                         help='Choose a 3D .nii or .nii.gz registered to the same space as the DWI maps.').strip()
     if custom:
         try:
-            path = validate_population_paths({'WM': custom}, ['WM'], space)['WM']
+            path = validate_mask_path(custom, 'White-matter mask', space)
             image = load_white_matter_image(path)
         except (OSError, ValueError) as exc:
             st.warning(str(exc))
@@ -526,14 +529,17 @@ def mask_page(state):
         for analyte in signals['analytes']:
             mapping[analyte['id']] = path_input(
                 f'{analyte["label"]} population mask', key=('wf_dwi_mask_' if dwi else 'wf_mask_') + analyte['id'],
-                extensions=('.nii', '.nii.gz'))
+                extensions=NIFTI_EXTENSIONS)
         mask['precomputed'] = mapping
         state['mask'] = mask
         if st.button('Load masks', type='primary'):
-            validate_population_paths(mapping, [item['id'] for item in signals['analytes']],
-                                      state['data']['space'], state['data']['resolution'])
+            state.pop('mask_check', None)
+            paths = validate_population_paths(mapping, mapping, state['data']['space'], state['data']['resolution'])
+            for analyte in signals['analytes']:
+                load_mask_image(paths[analyte['id']], analyte['label'])
             state['mask_check'] = _mask_identity(state)
-            st.success('All population mask paths found. Binary values and image grids will be checked when the command runs.')
+        if state.get('mask_check') == _mask_identity(state):
+            st.success('All 3D population masks found. VLAD checks binary values and image grids when the command runs.')
     elif dwi:
         if mask['mode'] == 'white_matter':
             st.caption('Keep white-matter voxels with a finite, nonzero value in every included observation.')
@@ -751,6 +757,48 @@ def contrast_page(state):
         st.warning(str(exc))
 
 
+def _report_background_input(state):
+    source = st.radio('Background source', ['Automatic', 'TemplateFlow', 'Custom NIfTI'],
+                      key='wf_report_background_source', horizontal=True,
+                      help='Anatomy for the corrected-map overlays in the HTML report.')
+    if source == 'Automatic':
+        return None
+    try:
+        if source == 'Custom NIfTI':
+            path = path_input('Report background NIfTI', key='wf_report_background_path',
+                              extensions=NIFTI_EXTENSIONS).strip()
+            if not path:
+                return ''
+            reference = validate_reference_anatomy(local_nifti_path(path))
+            st.caption(f'✅ Report background ready · {reference.name}')
+            return str(reference)
+        templates = list_templates()
+        if not templates:
+            raise ValueError('The TemplateFlow catalogue has no anatomical images.')
+        space = state.get('data', {}).get('space', '')
+        preferred = 'MNI152NLin6Asym' if space.casefold() == 'mni' else space
+        default = next((name for name in (preferred, 'MNI152NLin2009cAsym') if name in templates), templates[0])
+        template = st.selectbox('TemplateFlow report template', templates, index=templates.index(default),
+                                key='wf_report_template')
+        names = template_options(template)['files']
+        name = st.selectbox('Background image', names, format_func=lambda item: Path(item).name,
+                            key=f'wf_report_anatomy_{template}')
+        selection = (template, name)
+        if st.button('Load report template'):
+            validate_output_location(state, _cache_home())
+            with st.spinner('Loading report anatomy…'):
+                path = fetch_anatomical_image(template, name)
+            state['loaded_report_template'] = (selection, str(path))
+        loaded = state.get('loaded_report_template')
+        if loaded and loaded[0] == selection:
+            st.caption(f'✅ Report background ready · {Path(loaded[1]).name}')
+            return loaded[1]
+        st.caption('Click Load report template to use this image.')
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        st.warning(str(exc))
+    return ''
+
+
 def settings_page(state):
     st.header('Randomise settings')
     a, b = st.columns(2)
@@ -776,6 +824,8 @@ def settings_page(state):
                           'variance_smoothing': float(smoothing), 'seed': int(seed), 'tfce_h': float(h), 'tfce_e': float(extent),
                           'tfce_c': connectivity, 'block_column': blocks_column}
     st.caption('The model includes an intercept. Image and mask preparation run sequentially. Randomise runs up to nproc maps concurrently, with contrasts within one map tested sequentially.')
+    with st.expander('Report background'):
+        state['report_reference'] = _report_background_input(state)
 
 
 def compile_plan(state, output):
@@ -824,8 +874,17 @@ def compile_plan(state, output):
                      analytes=signals['analytes'],
                      requested_analytes=signals['config']['dwi_series' if modality == 'DWI' else 'metabolites'],
                      source_metabolites=signals['source_metabolites'])
+    if mask['mode'] == 'precomputed':
+        paths = validate_population_paths(mask['precomputed'], plan_data['metabolites'],
+                                          plan_data['space'], plan_data.get('resolution', ''))
+        mask = mask | {'precomputed': paths}
     plan = {'version': 1, 'output_dir': str(output), 'data': plan_data, 'mask': mask, 'rows': rows, 'model': model,
             'randomise': options, 'covariates_source': state['covars_path']}
+    reference = state.get('report_reference')
+    if reference == '':
+        raise ValueError('Randomise settings: load the selected report background or choose Automatic.')
+    if reference:
+        plan['report_reference'] = reference
     if modality == 'MRSI' and (tissue_masks := tissue_mask_paths(state.get('tissue_masks', {}), plan_data['space'])):
         plan['tissue_masks'] = tissue_masks
     elif cached := tissue_probabilities(plan_data['space']):

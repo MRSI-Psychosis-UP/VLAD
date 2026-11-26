@@ -22,7 +22,9 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import _vest, validate_contrasts
-from vlad.workflow.core import NATIVE_SPACES, validate_output_location, validate_population_paths
+from vlad.gui.templates import validate_reference_anatomy
+from vlad.workflow.core import (NATIVE_SPACES, local_nifti_path, validate_mask_path, validate_output_location,
+                                validate_population_paths)
 from vlad.workflow.gauge import correct_map_voxelwise, gauge_from_group_means
 from vlad.workflow.tissues import align_tissue_masks, align_white_matter, load_white_matter_image, report_tissue_inputs
 
@@ -341,8 +343,6 @@ def validate_plan(plan):
     if not 0 < float(mask['coverage']) <= 100: raise ValueError('Coverage must be above 0 and at most 100%.')
     if mask['mode'] in ('coverage', 'white_matter') and float(mask['coverage']) != 100:
         raise ValueError('Common DWI coverage requires a finite nonzero value in every included observation.')
-    if mask['mode'] == 'precomputed':
-        validate_population_paths(mask['precomputed'], metabolites, plan['data']['space'], plan['data'].get('resolution', ''))
     if mask['mode'] == 'quality':
         metrics = mask['metrics']
         if not metrics or len({metric['name'] for metric in metrics}) != len(metrics):
@@ -352,11 +352,16 @@ def validate_plan(plan):
             if metric.get('threshold') is None or not math.isfinite(float(metric['threshold'])):
                 raise ValueError(f'Enter the {metric["name"]} threshold in {metric["unit"]}.')
     source_paths = set(report_tissue_inputs(plan)[0].values())
-    if mask['mode'] == 'white_matter':
+    if reference := plan.get('report_reference'):
+        source_paths.add(str(validate_reference_anatomy(local_nifti_path(reference))))
+    if mask['mode'] == 'precomputed':
+        validate_population_paths(mask['precomputed'], metabolites, plan['data']['space'], plan['data'].get('resolution', ''))
+        source_paths.update(str(local_nifti_path(mask['precomputed'][met])) for met in metabolites)
+    elif mask['mode'] == 'white_matter':
         wm = mask.get('white_matter', {})
         if not wm.get('path') or not isinstance(wm.get('probability'), bool):
             raise ValueError('Population mask: choose a 3D white-matter NIfTI or download a matching WM map.')
-        wm_path = validate_population_paths({'WM': wm['path']}, ['WM'], plan['data']['space'])['WM']
+        wm_path = validate_mask_path(wm['path'], 'White-matter mask', plan['data']['space'])
         load_white_matter_image(wm_path)
         source_paths.add(wm_path)
     for row in rows:
@@ -365,8 +370,6 @@ def validate_plan(plan):
                 source_paths.add(row['images'][met])
                 if mask['mode'] == 'quality':
                     source_paths.update(row['quality'][met][metric['name']] for metric in mask['metrics'])
-            if mask['mode'] == 'precomputed':
-                source_paths.add(mask['precomputed'][analyte['id']])
     output = Path(plan['output_dir'])
     if not output.is_absolute(): raise ValueError('Use an absolute output directory.')
     validate_output_location(plan, output)
@@ -545,12 +548,12 @@ def execute(plan, *, prepare_only=False):
                     group_sum = np.zeros(image.shape, dtype=np.float64)
                     group_count = np.zeros(image.shape, dtype=np.uint32)
                 if mask['mode'] == 'precomputed':
-                    supplied = _load(mask['precomputed'][met], image).get_fdata(dtype=np.float32)
+                    supplied = _load(local_nifti_path(mask['precomputed'][met]), image).get_fdata(dtype=np.float32)
                     if not np.isfinite(supplied).all() or not np.isin(supplied, [0, 1]).all() or not supplied.any():
                         raise ValueError(f'{label}: supplied population mask must be nonempty, finite and binary.')
                 elif mask['mode'] == 'white_matter':
                     wm = mask['white_matter']
-                    white_matter = align_white_matter(wm['path'], image, probability=wm['probability'])
+                    white_matter = align_white_matter(local_nifti_path(wm['path']), image, probability=wm['probability'])
             finite_all &= valid_signal
             if gauge_enabled:
                 group_sum[valid_signal] += signal[valid_signal]
@@ -650,11 +653,14 @@ def main(argv=None):
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--report-only', action='store_true',
                         help='Regenerate the visual HTML report for an existing completed run.')
+    parser.add_argument('--reference-anatomy', help='Background NIfTI path for a report-only run.')
     parser.add_argument('--gm-mask', type=Path, help='Gray matter binary NIfTI for a report-only run.')
     parser.add_argument('--wm-mask', type=Path, help='White matter binary NIfTI for a report-only run.')
     args = parser.parse_args(argv)
     if args.prepare_only and args.report_only:
         parser.error('--prepare-only and --report-only cannot be combined.')
+    if args.reference_anatomy and not args.report_only:
+        parser.error('--reference-anatomy requires --report-only.')
     if args.gm_mask or args.wm_mask:
         if not (args.report_only and args.gm_mask and args.wm_mask):
             parser.error('--gm-mask and --wm-mask must be supplied together with --report-only.')
@@ -666,6 +672,8 @@ def main(argv=None):
         plan = json.loads(args.plan.read_text())
         if args.report_only:
             from vlad.workflow.report import generate_guided_report
+            if args.reference_anatomy:
+                plan['report_reference'] = args.reference_anatomy
             if args.gm_mask:
                 plan['tissue_masks'] = {'gm': str(args.gm_mask), 'wm': str(args.wm_mask)}
             output = Path(plan['output_dir'])

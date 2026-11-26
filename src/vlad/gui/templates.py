@@ -101,9 +101,12 @@ def _same_label(left, right) -> bool:
     return int(left) == int(right) if left.isdigit() and right.isdigit() else left == right
 
 
-def _validate_reference(path: Path) -> Path:
+def validate_reference_anatomy(path: Path) -> Path:
     import nibabel as nib
     import numpy as np
+    path = Path(path).expanduser()
+    if not path.is_file() or not path.name.lower().endswith(('.nii', '.nii.gz')):
+        raise ValueError(f'Choose an existing anatomical NIfTI (.nii or .nii.gz): {path}')
     try:
         image = nib.load(path)
         if len(image.shape) != 3 or not np.isfinite(image.affine).all():
@@ -117,7 +120,7 @@ def _cached_resource(name):
     for root in _cache_roots():
         path = root / name
         if path.is_file() and path.stat().st_size:
-            return _validate_reference(path)
+            return validate_reference_anatomy(path)
     return None
 
 
@@ -152,7 +155,7 @@ print('VLAD_TEMPLATE=' + json.dumps(str(path)))
     path = Path(json.loads(lines[-1]))
     if not path.is_file() or not path.stat().st_size:
         raise RuntimeError("TemplateFlow did not return a nonempty NIfTI image.")
-    return _validate_reference(path)
+    return validate_reference_anatomy(path)
 
 
 def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T1w") -> Path:
@@ -172,6 +175,13 @@ def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T
     if len(candidates) != 1:
         raise ValueError(f"The selection matches {len(candidates)} anatomical files. Select a specific template resolution and cohort.")
     return _fetch_resource(template, candidates[0])
+
+
+def fetch_anatomical_image(template: str, name: str) -> Path:
+    """Fetch the exact anatomical image selected in a template catalogue."""
+    if name not in _files(template):
+        raise ValueError('Choose an anatomical image listed for the selected template.')
+    return _fetch_resource(template, name)
 
 
 def _tissue_resources(template: str) -> dict:
@@ -236,7 +246,7 @@ def fsl_white_matter(*, download=False) -> Path | None:
         temp = Path(stream.name)
     try:
         temp.write_bytes(data)
-        _validate_reference(temp)
+        validate_reference_anatomy(temp)
         temp.replace(path)
     finally:
         temp.unlink(missing_ok=True)
