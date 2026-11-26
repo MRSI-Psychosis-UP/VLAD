@@ -34,6 +34,8 @@ def report_tissue_inputs(plan):
         return masks, False
     if saved := plan.get('tissue_probabilities'):
         return tissue_mask_paths(saved, space), True
+    if plan['data'].get('modality') == 'DWI':
+        return {}, False
     return tissue_probabilities(space), True
 
 
@@ -45,6 +47,29 @@ def _load_tissue(path, label):
     if len(image.shape) != 3 or not np.isfinite(image.affine).all() or np.linalg.matrix_rank(image.affine[:3, :3]) != 3:
         raise ValueError(f'{label}: the tissue image must be 3D with a valid affine.')
     return image
+
+
+def _align_binary(data, image, reference):
+    if image.shape != reference.shape or not np.allclose(image.affine, reference.affine, atol=1e-4, rtol=0):
+        binary = nib.Nifti1Image(data.astype(np.uint8), image.affine)
+        data = np.asanyarray(resample_from_to(binary, (reference.shape, reference.affine), order=0).dataobj)
+    return data.astype(bool)
+
+
+def align_white_matter(path, reference, *, probability=False):
+    """Binarize a WM probability map or sample a binary WM mask on the DWI grid."""
+    image = _load_tissue(Path(path).expanduser(), TISSUES['wm'])
+    values = image.get_fdata(dtype=np.float32)
+    if probability:
+        if not np.isfinite(values).all() or values.min() < 0 or values.max() > 1:
+            raise ValueError('White-matter probabilities must be finite and between 0 and 1.')
+        values = values >= .5
+    elif not np.isin(values, (0, 1)).all():
+        raise ValueError('The white-matter mask must be binary (0 or 1).')
+    aligned = _align_binary(values, image, reference)
+    if not aligned.any():
+        raise ValueError('The white-matter mask is empty on the DWI grid. Check the registration space and mask.')
+    return aligned
 
 
 def align_tissue_masks(paths, reference, *, probabilities=False):
@@ -66,10 +91,7 @@ def align_tissue_masks(paths, reference, *, probabilities=False):
         data = values[key]
         if not probabilities and (not np.isin(data, (0, 1)).all() or not data.any()):
             raise ValueError(f'{label}: the tissue mask must be nonempty and binary (0 or 1).')
-        if image.shape != reference.shape or not np.allclose(image.affine, reference.affine, atol=1e-4, rtol=0):
-            binary = nib.Nifti1Image(data.astype(np.uint8), image.affine)
-            data = np.asanyarray(resample_from_to(binary, (reference.shape, reference.affine), order=0).dataobj)
-        aligned[key] = data.astype(bool)
+        aligned[key] = _align_binary(data, image, reference)
     if aligned and np.any(aligned['gm'] & aligned['wm']):
         raise ValueError('GM and WM tissue masks overlap on the analysis grid. Use non-overlapping binary masks.')
     return aligned

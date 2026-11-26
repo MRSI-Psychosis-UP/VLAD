@@ -462,6 +462,33 @@ class GuidedInterfaceTests(GuidedFixture):
         self.page(app, 2)
         self.assertTrue(any('7 observations' in item.value for item in app.success))
 
+    def test_group_contrasts_use_one_age_column_when_tsv_contains_missing_ages(self):
+        frame = self.frame.rename(columns={'Age': 'age', 'Sex': 'sex'})
+        frame.loc[2, 'age'] = 'n/a'
+        frame['group'] = ['ARMS', 'CTRL', 'ARMS', 'ARMS', 'CTRL', 'CTRL', 'ARMS', 'CTRL']
+        frame.to_csv(self.table, sep='\t', index=False)
+        app = self.app()
+        self.load_data(app)
+        app.selectbox(key='wf_filter_column').set_value('age')
+        app.selectbox(key='wf_filter_mode').set_value('Has a value').run()
+        self.click(app, '+ Add filter')
+
+        self.page(app, 2)
+        workflow = app.session_state['guided_workflow']
+        roles = {row['Name']: row['Type'] for row in workflow['roles']}
+        self.assertEqual(roles, {'age': 'Numeric', 'sex': 'Categorical', 'group': 'Categorical'})
+        editor_key = f'wf_roles_{workflow["table_id"][:12]}_{workflow.get("roles_editor_revision", 0)}'
+        app.session_state[editor_key] = {
+            'edited_rows': {0: {'Confound': True, 'Regressor': False},
+                            1: {'Include': True, 'Confound': True},
+                            2: {'Include': True, 'Regressor': True}},
+            'added_rows': [], 'deleted_rows': []}
+        app.run()
+        self.healthy(app)
+        self.page(app, 3)
+        self.assertEqual(app.dataframe[0].value['Column'].tolist(), ['Intercept', 'age', 'sex[M]', 'group[CTRL]'])
+        self.assertEqual(app.dataframe[1].value.values.tolist(), [[0, 0, 0, 1], [0, 0, 0, -1]])
+
     def test_image_folder_scan_proposes_metabolite_labels(self):
         app = self.app(); self.healthy(app)
         scan = next(button for button in app.button if button.label == 'Scan folder')

@@ -570,6 +570,12 @@ def _exclusive_checkbox_roles(edited, previous):
     return result, changed
 
 
+def _default_model_type(values):
+    observed = values[~missing_covariate_values(values)]
+    numeric = pd.to_numeric(observed, errors='coerce')
+    return 'Numeric' if numeric.notna().all() and numeric.nunique() > 2 else 'Categorical'
+
+
 def model_page(state):
     st.header('Model')
     if 'frame' not in state:
@@ -581,8 +587,7 @@ def model_page(state):
     if 'roles' not in state:
         default = next((name for name in ('Age', 'age', 'Diag', 'Group', 'Score') if name in measured), measured[0])
         state['roles'] = [{'Include': name == default, 'Name': name,
-            'Type': ('Numeric' if pd.to_numeric(state['frame'][name], errors='coerce').notna().all()
-                     and state['frame'][name].nunique(dropna=True) > 2 else 'Categorical'),
+            'Type': _default_model_type(state['frame'][name]),
             'Confound': False, 'Regressor': name == default, 'Reference': ''} for name in measured]
     for row in state['roles']:
         row.setdefault('Z-score', False)
@@ -597,7 +602,8 @@ def model_page(state):
             'Z-score': st.column_config.CheckboxColumn(
                 'Z-score', help='For numeric confounds or regressors, subtract the mean and divide by the standard deviation of the included rows.'),
             'Type': st.column_config.SelectboxColumn(
-                'Type', options=['Numeric', 'Categorical'], required=True),
+                'Type', options=['Numeric', 'Categorical'], required=True,
+                help='Numeric variables such as age use one design column. Categorical variables use one column per level beyond the reference.'),
         })
     state['roles'], corrected = _exclusive_checkbox_roles(roles, state['roles'])
     if corrected:

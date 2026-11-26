@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from hashlib import sha256
 import importlib.util
 import json
 import os
@@ -10,9 +11,15 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+from tempfile import NamedTemporaryFile
+from urllib.request import urlopen
 import zipfile
 
 from vlad.paths import project_root
+
+
+FSL_WM_URL = 'https://git.fmrib.ox.ac.uk/fsl/mist/-/raw/2512.2/data/masks/wm_thr75.nii.gz'
+FSL_WM_SHA256 = 'f784af57a9874ab7f129579ccf51c7b100ca118a11337c71120dfb7e5c238151'
 
 
 def _cache_home() -> Path:
@@ -167,8 +174,7 @@ def fetch_template(template: str, resolution=None, cohort=None, suffix: str = "T
     return _fetch_resource(template, candidates[0])
 
 
-def tissue_probabilities(template: str, *, download=False) -> dict:
-    """Find exact-space, cohort-independent GM and WM probability maps."""
+def _tissue_resources(template: str) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", template):
         return {}
     pairs = {}
@@ -180,6 +186,12 @@ def tissue_probabilities(template: str, *, download=False) -> dict:
         if (fields["suffix"] == "probseg" and fields.get("label") in {"GM", "WM"}
                 and fields.keys() <= {"tpl", "res", "label", "suffix"}):
             pairs.setdefault(fields.get("res", ""), {})[fields["label"].lower()] = name
+    return pairs
+
+
+def tissue_probabilities(template: str, *, download=False) -> dict:
+    """Find exact-space, cohort-independent GM and WM probability maps."""
+    pairs = _tissue_resources(template)
     for _, pair in sorted(pairs.items()):
         if len(pair) == 2:
             if download:
@@ -190,3 +202,42 @@ def tissue_probabilities(template: str, *, download=False) -> dict:
     if download:
         raise ValueError(f"TemplateFlow has no matching GM/WM probability pair for {template}. Choose custom masks for this space.")
     return {}
+
+
+def white_matter_probability(template: str, *, download=False) -> Path | None:
+    """Find a TemplateFlow WM map independently of any GM map."""
+    candidates = [pair['wm'] for _, pair in sorted(_tissue_resources(template).items()) if 'wm' in pair]
+    for name in candidates:
+        if cached := _cached_resource(name):
+            return cached
+    if download:
+        if not candidates:
+            raise ValueError(f'TemplateFlow has no WM probability map for {template}. Choose a matching binary WM mask.')
+        return _fetch_resource(template, candidates[0])
+    return None
+
+
+def fsl_white_matter(*, download=False) -> Path | None:
+    """Cache FSL MIST's binary MNI152 WM mask from a pinned release."""
+    path = _cache_home() / 'fsl' / 'mist-2512.2' / 'wm_thr75.nii.gz'
+    if path.is_file() and sha256(path.read_bytes()).hexdigest() == FSL_WM_SHA256:
+        return path
+    if not download:
+        return None
+    installed = Path(os.environ.get('FSLDIR', '~/fsl')).expanduser() / 'data/mist/masks/wm_thr75.nii.gz'
+    data = installed.read_bytes() if installed.is_file() else b''
+    if sha256(data).hexdigest() != FSL_WM_SHA256:
+        with urlopen(FSL_WM_URL, timeout=30) as response:
+            data = response.read(100_000)
+    if sha256(data).hexdigest() != FSL_WM_SHA256:
+        raise ValueError('The downloaded FSL white-matter mask failed its checksum.')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, suffix='.nii.gz', delete=False) as stream:
+        temp = Path(stream.name)
+    try:
+        temp.write_bytes(data)
+        _validate_reference(temp)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return path

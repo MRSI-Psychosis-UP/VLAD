@@ -24,7 +24,7 @@ from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import _vest, validate_contrasts
 from vlad.workflow.core import NATIVE_SPACES, validate_output_location, validate_population_paths
 from vlad.workflow.gauge import correct_map_voxelwise, gauge_from_group_means
-from vlad.workflow.tissues import align_tissue_masks, report_tissue_inputs
+from vlad.workflow.tissues import align_tissue_masks, align_white_matter, report_tissue_inputs
 
 
 PROGRESS_PREFIX = 'VLAD_PROGRESS '
@@ -316,11 +316,11 @@ def validate_plan(plan):
     if len({visit.split('_')[0] for visit in visits}) != len(visits) and not blocks:
         raise ValueError('Repeated subjects require an explicit exchangeability-block column or one selected visit per subject.')
     mask = plan['mask']
-    mask_modes = ('coverage', 'precomputed') if modality == 'DWI' else ('quality', 'precomputed')
+    mask_modes = ('coverage', 'white_matter', 'precomputed') if modality == 'DWI' else ('quality', 'precomputed')
     if mask['mode'] not in mask_modes:
         raise ValueError(f'Invalid population mask mode for {modality}.')
     if not 0 < float(mask['coverage']) <= 100: raise ValueError('Coverage must be above 0 and at most 100%.')
-    if mask['mode'] == 'coverage' and float(mask['coverage']) != 100:
+    if mask['mode'] in ('coverage', 'white_matter') and float(mask['coverage']) != 100:
         raise ValueError('Common DWI coverage requires a finite nonzero value in every included observation.')
     if mask['mode'] == 'precomputed':
         validate_population_paths(mask['precomputed'], metabolites, plan['data']['space'], plan['data'].get('resolution', ''))
@@ -333,6 +333,11 @@ def validate_plan(plan):
             if metric.get('threshold') is None or not math.isfinite(float(metric['threshold'])):
                 raise ValueError(f'Enter the {metric["name"]} threshold in {metric["unit"]}.')
     source_paths = set(report_tissue_inputs(plan)[0].values())
+    if mask['mode'] == 'white_matter':
+        wm = mask.get('white_matter', {})
+        if not wm.get('path') or not isinstance(wm.get('probability'), bool):
+            raise ValueError('Population mask: download a matching white-matter map or choose a binary WM NIfTI.')
+        source_paths.update(validate_population_paths({'WM': wm['path']}, ['WM'], plan['data']['space']).values())
     for row in rows:
         for analyte in analytes:
             for met in analyte['components']:
@@ -498,6 +503,7 @@ def execute(plan, *, prepare_only=False):
         directory = output / met; directory.mkdir()
         (directory / 'individual_masks').mkdir()
         supplied = None
+        white_matter = None
         counts = None
         stack = None
         finite_all = None
@@ -519,12 +525,17 @@ def execute(plan, *, prepare_only=False):
                     supplied = _load(mask['precomputed'][met], image).get_fdata(dtype=np.float32)
                     if not np.isfinite(supplied).all() or not np.isin(supplied, [0, 1]).all() or not supplied.any():
                         raise ValueError(f'{label}: supplied population mask must be nonempty, finite and binary.')
+                elif mask['mode'] == 'white_matter':
+                    wm = mask['white_matter']
+                    white_matter = align_white_matter(wm['path'], image, probability=wm['probability'])
             finite_all &= valid_signal
             if gauge_enabled:
                 group_sum[valid_signal] += signal[valid_signal]
                 group_count[valid_signal] += 1
-            if mask['mode'] == 'coverage':
+            if mask['mode'] in ('coverage', 'white_matter'):
                 good = valid_signal & (signal != 0)
+                if white_matter is not None:
+                    good &= white_matter
             elif supplied is None:
                 good = valid_signal.copy()
                 quality_cache = {}
