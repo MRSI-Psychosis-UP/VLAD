@@ -13,6 +13,8 @@ from streamlit.testing.v1 import AppTest
 from test_workflow_guided import GuidedFixture
 from vlad.gui.jobs import JobStore
 from vlad.gui.wizard import STEPS, _command_model_summary, _exclusive_checkbox_roles
+from vlad.workflow.core import discover_dwi_series
+from vlad.workflow.runner import execute
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -110,6 +112,85 @@ class GuidedInterfaceTests(GuidedFixture):
             app.text_input(key='wf_tissue_gm').set_value('/custom/gm.nii.gz').run()
             self.healthy(app)
             self.assertFalse(any('✅ TemplateFlow cache' in item.value for item in app.caption))
+
+    def test_dwi_series_generate_and_prepare_a_plan_with_common_coverage(self):
+        folder = self.base / 'dwi-preprocessing'
+        series = {
+            'space-mni_model-SHORE_desc-dipy_res-1mm_FA_MNI': (2, 2, 2),
+            'space-mni_model-dki_desc-md_res-2mm_dwi': (3, 3, 3),
+        }
+        partial = 'space-mni_model-wmtiw_desc-deperp_dwi'
+        for index, visit in enumerate(self.visits):
+            subject, session = visit.split('_')
+            directory = folder / f'sub-{subject}' / f'ses-{session}' / 'dwi'
+            directory.mkdir(parents=True)
+            prefix = f'sub-{subject}_ses-{session}_'
+            for label, shape in series.items():
+                values = np.full(shape, index + 1., dtype=np.float32)
+                if index == 0:
+                    values[0, 0, 0] = 0.
+                nib.save(nib.Nifti1Image(values, np.eye(4)), directory / f'{prefix}{label}.nii.gz')
+            nib.save(nib.Nifti1Image(np.ones((2, 2, 2, 3)), np.eye(4)),
+                     directory / f'{prefix}space-mni_desc-preproc_dwi.nii.gz')
+            if index < 2:
+                nib.save(nib.Nifti1Image(np.ones((2, 2, 2)), np.eye(4)),
+                         directory / f'{prefix}{partial}.nii.gz')
+        nib.save(nib.Nifti1Image(np.ones((2, 2, 2)), np.eye(4)),
+                 folder / f'sub-extra_ses-01_{partial}.nii.gz')
+        self.assertEqual(discover_dwi_series(folder, space='mni', resolution='1mm'),
+                         {'space-mni_model-SHORE_desc-dipy_res-1mm_FA_MNI': dict.fromkeys(self.visits, 1)})
+
+        app = self.app()
+        self.load_data(app)
+        app.radio(key='wf_modality').set_value('DWI').run()
+        app.text_input(key='wf_dwi_images').set_value(str(folder)).run()
+        self.assertFalse(any(widget.key == 'wf_metabolites' for widget in app.text_input))
+        self.click(app, 'Scan DWI folder')
+        picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
+        self.assertEqual(len(picker.options), 3)
+        self.assertEqual(picker.options[-1], f'{partial} (2/8 TSV · 3 folder)')
+        picker.set_value([partial]).run()
+        self.click(app, 'Load NIfTI paths')
+        self.assertTrue(any('2/8 TSV visits have all selected DWI maps' in item.value for item in app.warning))
+        table = next(widget.value for widget in app.data_editor if 'Images found' in widget.value)
+        self.assertEqual(table['Images found'].tolist().count('✅'), 2)
+        self.assertFalse(table['Exclude'].any())
+        picker = next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps')
+        picker.set_value(list(series)).run()
+        self.click(app, 'Load NIfTI paths')
+        self.assertTrue(any('8/8 TSV visits have all selected DWI maps' in item.value for item in app.success))
+        self.page(app, 1)
+        self.assertEqual(app.radio(key='wf_dwi_mask_mode').value, 'Common nonzero coverage')
+        self.assertFalse(any(button.label == 'Load quality paths' for button in app.button))
+        for page in (2, 3, 4, 5):
+            self.page(app, page)
+        self.assertTrue(app.text_input(key='wf_run_name').value.startswith('DWI-'))
+        app.text_input(key='wf_run_name').set_value('DWI-Test').run()
+        self.click(app, 'Generate command')
+        plan_path = next((self.table.parent / 'plans').glob('DWI-Test-*.json'))
+        plan = json.loads(plan_path.read_text())
+        self.assertEqual(plan['data']['modality'], 'DWI')
+        self.assertEqual(plan['data']['requested_analytes'], list(series))
+        self.assertEqual(plan['mask']['mode'], 'coverage')
+        self.assertEqual(plan['model']['subjects'], self.visits)
+        output = execute(plan, prepare_only=True)
+        for analyte in plan['data']['analytes']:
+            directory = output / analyte['id']
+            mask = nib.load(directory / 'population_mask.nii.gz').get_fdata()
+            self.assertEqual(mask.shape, series[analyte['label']])
+            self.assertEqual(mask.sum(), mask.size - 1)
+            coverage = nib.load(directory / 'coverage.nii.gz').get_fdata()
+            self.assertEqual(coverage[0, 0, 0], 7 / 8)
+        self.assertIn('2 DWI scalar maps', (output / 'report.html').read_text())
+
+        self.page(app, 0)
+        self.assertEqual(app.radio(key='wf_modality').value, 'DWI')
+        self.assertEqual(next(widget for widget in app.multiselect if widget.label == 'DWI scalar maps').value,
+                         list(series))
+        app.radio(key='wf_modality').set_value('MRSI').run()
+        self.healthy(app)
+        self.assertEqual(app.text_input(key='wf_images').value, str(self.inputs))
+        self.assertEqual(app.text_input(key='wf_metabolites').value, 'NAA CrPCr')
 
     def test_default_workflow_has_six_steps_and_preserves_inputs_across_pages(self):
         app = self.app(); self.healthy(app)

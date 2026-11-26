@@ -101,19 +101,25 @@ For a remote server, suppress automatic browser opening:
 
 Use `--host` and `--port` when a different listen address or port is required.
 
-### Guided MRSI workflow
+### Guided MRSI and DWI workflow
 
 The command generator has six steps:
 
-1. **Data** — load a covariate TSV containing `participant_id` and `session_id`,
-   choose the MRSI derivative folder, and match `space-`, `met-`, optional
+1. **Data** — select **MRSI** or **DWI** and load a covariate TSV containing
+   `participant_id` and `session_id`. For MRSI, choose the derivative folder
+   and match `space-`, `met-`, optional
    `desc-`, and optional `res-` filename entities. Rows can be filtered or
    explicitly excluded. Metabolite entries may include voxelwise ratios such as
    `Glu/GABA` and `Glu/SUMOFMETABOLITES`. A `z_` prefix requests gauge
    correction. For example, `z_Glu GABA` tests corrected Glu and raw GABA.
+   For DWI, choose a `dwi-preprocessing/` folder, enter the exact shared space
+   (such as `mni`), click **Scan DWI folder**, and select one or more 3D scalar
+   series. Each series matches the same filename pattern across subject visits.
 2. **Population mask** — use one precomputed binary mask per metabolite/ratio or
    build population masks from matching quality maps. The defaults are CRLB
    `<20`, FWHM `<0.1` and SNR `>10`, with 68% population coverage.
+   For DWI, use the common finite nonzero coverage across all included
+   observations or supply a binary mask for each series.
    For tissue histograms, use the cached TemplateFlow maps for the matching
    space, download them in this step, or supply matching binary GM and WM masks.
 3. **Model** — retain the covariate table layout and select `Include`, `Confound`
@@ -125,7 +131,7 @@ The command generator has six steps:
    directions are selected by default; keep either one or both, enter custom
    weights, or load a contrast file.
 5. **Randomise settings** — choose permutations, TFCE, variance smoothing,
-   corrected outputs, seed, exchangeability blocks and the number of metabolites
+   corrected outputs, seed, exchangeability blocks and the number of maps
    processed concurrently.
 6. **Command** — choose the study output folder and run name, then click
    **Generate command**. VLAD validates the complete design, creates the study

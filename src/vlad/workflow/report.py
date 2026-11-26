@@ -1,4 +1,4 @@
-"""Self-contained visual report for the guided MRSI Randomise workflow."""
+"""Self-contained visual report for guided MRSI and DWI Randomise runs."""
 
 from __future__ import annotations
 
@@ -231,6 +231,8 @@ def generate_guided_report(plan, output, summary=None):
     significant_maps = 0
     generated_files = []
     overview = []
+    dwi = plan['data'].get('modality') == 'DWI'
+    map_column = 'DWI series' if dwi else 'Metabolite'
     for row_number, result in enumerate(summary, 1):
         stat_path = Path(result['map'])
         if not stat_path.is_file():
@@ -249,7 +251,7 @@ def generate_guided_report(plan, output, summary=None):
             raise ValueError(f'{metabolite}: corrected map and population mask grids differ.')
         significant = np.isfinite(corrected_map) & population & (corrected_map >= SIGNIFICANCE)
         voxel_count = int(significant.sum())
-        overview.append({'Metabolite': metabolite, 'Contrast': contrast,
+        overview.append({map_column: metabolite, 'Contrast': contrast,
                          'Corrected map': stat_path.name, 'Significant voxels': voxel_count})
         if not voxel_count:
             continue
@@ -257,7 +259,7 @@ def generate_guided_report(plan, output, summary=None):
         kind = 'tfce' if 'tfce' in stat_path.name else ('voxelwise' if 'vox' in stat_path.name else 'corrected')
         match = re.search(r'tstat(\d+)', stat_path.name)
         contrast_id = match.group(1) if match else str(row_number)
-        prefix = f'{row_number:03d}_{_safe(metabolite)}_{kind}_tstat{contrast_id}'
+        prefix = f'{row_number:03d}_{_safe(analyte_id if dwi else metabolite)}_{kind}_tstat{contrast_id}'
         tissue_panel = '<p class="meta">GM/WM tissue maps are unavailable for this space.</p>'
         if tissue_paths:
             try:
@@ -298,13 +300,13 @@ def generate_guided_report(plan, output, summary=None):
             stack_name = 'signals_raw.nii.gz'
         if stack_name not in {'signals.nii.gz', 'signals_raw.nii.gz'}:
             raise ValueError(f'{metabolite}: invalid signal stack name in results metadata.')
-        signals_image = nib.load(output / analyte_id / stack_name)
+        signals_image = nib.load(output / analyte_id / stack_name, keep_file_open=True)
         if (len(signals_image.shape) != 4 or signals_image.shape[:3] != significant.shape or
                 signals_image.shape[3] != len(subjects) or
                 not np.allclose(image.affine, signals_image.affine, atol=1e-4, rtol=0)):
             raise ValueError(f'{metabolite}: 4D signal stack does not match the report rows/grid.')
-        signals = signals_image.get_fdata(dtype=np.float32)[significant]
-        regional = np.nanmean(signals, axis=0)
+        regional = [np.nanmean(np.asarray(signals_image.dataobj[..., index], dtype=np.float32)[significant])
+                    for index in range(len(subjects))]
         extracted = pd.DataFrame({'subject_session': subjects,
                                   role['Name']: [item.get(role['Name']) for item in covariates],
                                   'mean_signal': regional})
@@ -337,6 +339,8 @@ def generate_guided_report(plan, output, summary=None):
                     if encoding.get('transform') == 'z-score']
     encoding_note = '<h3>Z-scored variables</h3>' + _table(standardized) if standardized else ''
     gauge = plan.get('randomise', {}).get('gauge_correction', False) or 'gauge' in views.values()
+    map_kind = 'DWI scalar maps' if dwi else 'metabolites'
+    gauge_note = '' if dwi else f' · gauge correction {"enabled" if gauge else "disabled"}'
     reference_note = str(reference) if reference else 'No cached/custom anatomy found; slice plots use Nilearn background.'
     empty = ('' if significant_maps else
              '<section><h2>No significant clusters</h2><p>No corrected map contained voxels '
@@ -345,7 +349,7 @@ def generate_guided_report(plan, output, summary=None):
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>VLAD visual report</title>
 <style>:root{{font-family:system-ui,sans-serif;color:#183448;background:#edf3f6;line-height:1.45}}body{{max-width:1300px;margin:2rem auto;padding:0 1rem}}header,section{{background:white;padding:1.4rem 1.8rem;margin:1rem 0;border-radius:9px}}h1{{font-size:1.8rem}}h2{{color:#087f8c}}.meta{{color:#526b78;font-size:.9rem}}.plot{{max-width:720px;margin:1rem auto}}img{{width:100%;height:auto}}.table-scroll{{overflow:auto}}table{{border-collapse:collapse;width:100%;font-size:.85rem}}th,td{{padding:.5rem;border-bottom:1px solid #d7e2e8;text-align:left}}th{{background:#eef5f7}}.warning{{background:#fff4d6;padding:.8rem;border-left:4px solid #d99b22}}</style></head>
 <body><header><h1>VLAD Randomise visual report</h1><p>{_escape(output)}</p>
-<p>{len(subjects)} observations · {len(plan['data']['metabolites'])} metabolites · {len(plan['model']['contrasts'])} contrasts · gauge correction {'enabled' if gauge else 'disabled'}.</p>
+<p>{len(subjects)} observations · {len(plan['data']['metabolites'])} {map_kind} · {len(plan['model']['contrasts'])} contrasts{gauge_note}.</p>
 <p class="meta">Anatomical reference: {_escape(reference_note)}</p></header>
 <section><h2>Model and contrasts</h2><p>Design columns: {_escape(', '.join(plan['model']['columns']))}</p>{_table(contrasts)}{encoding_note}</section>
 <section><h2>Corrected-map overview</h2>{_table(overview)}</section>{empty}{''.join(sections)}

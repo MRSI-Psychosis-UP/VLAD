@@ -1,1 +1,1 @@
-"""Guided MRSI discovery, population masks and Randomise execution."""
+"""Guided MRSI and DWI discovery, population masks and Randomise execution."""

@@ -842,8 +842,10 @@ def main() -> None:
             st.success(notice)
         if error := st.session_state.pop("global_settings_error", None):
             st.error(error)
-    interface = st.sidebar.selectbox("Interface", ["Guided MRSI workflow", "Existing studies"], key="interface_mode")
-    if interface == "Guided MRSI workflow":
+    if st.session_state.get("interface_mode") == "Guided MRSI workflow":
+        st.session_state["interface_mode"] = "Guided workflow"
+    interface = st.sidebar.selectbox("Interface", ["Guided workflow", "Existing studies"], key="interface_mode")
+    if interface == "Guided workflow":
         from vlad.gui.wizard import render
         render(bids_dir=st.session_state.get("global_bids_dir", ""))
         return

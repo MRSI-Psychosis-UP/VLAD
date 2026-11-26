@@ -22,7 +22,7 @@ from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, T
 
 from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import _vest, validate_contrasts
-from vlad.workflow.core import validate_output_location, validate_population_paths
+from vlad.workflow.core import NATIVE_SPACES, validate_output_location, validate_population_paths
 from vlad.workflow.gauge import correct_map_voxelwise, gauge_from_group_means
 from vlad.workflow.tissues import align_tissue_masks, report_tissue_inputs
 
@@ -238,17 +238,20 @@ def validate_plan(plan):
     if plan.get('version') != 1:
         raise ValueError('Unsupported workflow plan version.')
     rows, metabolites, model = plan['rows'], plan['data']['metabolites'], plan['model']
+    modality = plan['data'].get('modality', 'MRSI')
+    if modality not in ('MRSI', 'DWI'):
+        raise ValueError('Choose MRSI or DWI as the map modality.')
     if not rows or not metabolites:
-        raise ValueError('Select subjects and metabolites first.')
+        raise ValueError('Select subjects and maps first.')
     visits = [row['visit'] for row in rows]
     if visits != model['subjects'] or len(visits) != len(set(visits)):
         raise ValueError('Image rows and model rows must have the same unique subject/session order.')
-    if len(set(metabolites)) != len(metabolites): raise ValueError('Duplicate metabolites.')
+    if len(set(metabolites)) != len(metabolites): raise ValueError('Duplicate map labels.')
     import re
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*_[A-Za-z0-9][A-Za-z0-9.-]*', visit) for visit in visits):
         raise ValueError('Invalid subject/session label in the run plan.')
     if any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+-]*', met) for met in metabolites):
-        raise ValueError('Invalid metabolite label.')
+        raise ValueError('Invalid output map label.')
     analytes = _analytes(plan)
     if [item.get('id') for item in analytes] != metabolites:
         raise ValueError('Analyte specifications must match the ordered output labels.')
@@ -265,11 +268,15 @@ def validate_plan(plan):
             raise ValueError(f'Invalid ratio specification: {item["label"]}')
         if item.get('view', 'raw') not in {'raw', 'gauge'}:
             raise ValueError(f'Invalid map view for {item["label"]}.')
+        if modality == 'DWI' and (item['operation'] != 'identity' or
+                                  item['components'] != [item.get('numerator')] or
+                                  item.get('view', 'raw') != 'raw'):
+            raise ValueError('DWI analysis requires one scalar image per observation for each series.')
         if item['operation'] == 'contrast' and (
                 len(item.get('coefficients', [])) != len(item['components']) or
                 not all(math.isfinite(float(value)) for value in item['coefficients'])):
             raise ValueError(f'Invalid gauge-map contrast: {item["label"]}.')
-    if plan['data']['space'].lower() in {'native', 't1w', 'dwi', 't2w', 'individual', 'orig', 'original'}:
+    if plan['data']['space'].lower() in NATIVE_SPACES:
         raise ValueError('Group analysis requires a common template space, not subject-native coordinates.')
     design = pd.DataFrame(model['matrix'], columns=model['columns'])
     if (len(design) != len(rows) or len(design) <= len(design.columns) or not np.isfinite(design).all().all()
@@ -281,9 +288,11 @@ def validate_plan(plan):
     if not isinstance(nperm, int) or nperm < 0: raise ValueError('Permutations must be a nonnegative integer (0 means exhaustive).')
     nproc = options.get('nproc', 1)
     if not isinstance(nproc, int) or not 1 <= nproc <= 64:
-        raise ValueError('Concurrent metabolites (nproc) must be an integer from 1 to 64.')
+        raise ValueError('Concurrent maps (nproc) must be an integer from 1 to 64.')
     if not isinstance(options.get('gauge_correction', False), bool):
         raise ValueError('Gauge correction must be enabled or disabled.')
+    if modality == 'DWI' and _gauge_enabled(plan):
+        raise ValueError('Gauge correction is available for MRSI only.')
     gauge_inputs = {_gauge_key(item) for item in analytes if item['operation'] != 'contrast'}
     if _gauge_enabled(plan) and len(gauge_inputs) < 2:
         raise ValueError('Gauge correction requires at least two distinct metabolite or ratio maps. For example, enter z_Glu GABA.')
@@ -307,8 +316,12 @@ def validate_plan(plan):
     if len({visit.split('_')[0] for visit in visits}) != len(visits) and not blocks:
         raise ValueError('Repeated subjects require an explicit exchangeability-block column or one selected visit per subject.')
     mask = plan['mask']
-    if mask['mode'] not in ('quality', 'precomputed'): raise ValueError('Invalid mask mode.')
+    mask_modes = ('coverage', 'precomputed') if modality == 'DWI' else ('quality', 'precomputed')
+    if mask['mode'] not in mask_modes:
+        raise ValueError(f'Invalid population mask mode for {modality}.')
     if not 0 < float(mask['coverage']) <= 100: raise ValueError('Coverage must be above 0 and at most 100%.')
+    if mask['mode'] == 'coverage' and float(mask['coverage']) != 100:
+        raise ValueError('Common DWI coverage requires a finite nonzero value in every included observation.')
     if mask['mode'] == 'precomputed':
         validate_population_paths(mask['precomputed'], metabolites, plan['data']['space'], plan['data'].get('resolution', ''))
     if mask['mode'] == 'quality':
@@ -475,7 +488,10 @@ def execute(plan, *, prepare_only=False):
     gauge_enabled = _gauge_enabled(plan)
     gauge_group_means = {}
     analytes = _analytes(plan)
+    modality = plan['data'].get('modality', 'MRSI')
     for analyte in analytes:
+        if modality == 'DWI':
+            reference = None  # Different scalar series can use different grids in the same space.
         met = analyte['id']
         label = analyte['label']
         print(f'[{label}] Checking 3D images and constructing masks for {len(plan["rows"])} observations', flush=True)
@@ -507,7 +523,9 @@ def execute(plan, *, prepare_only=False):
             if gauge_enabled:
                 group_sum[valid_signal] += signal[valid_signal]
                 group_count[valid_signal] += 1
-            if supplied is None:
+            if mask['mode'] == 'coverage':
+                good = valid_signal & (signal != 0)
+            elif supplied is None:
                 good = valid_signal.copy()
                 quality_cache = {}
                 for component in analyte['components']:
@@ -529,7 +547,10 @@ def execute(plan, *, prepare_only=False):
             if index == 0 or current == total_rows or int(current * 20 / total_rows) > int(index * 20 / total_rows):
                 _emit_progress(label, 'Preparing images and masks', current, total_rows, row['visit'])
         population = supplied.astype(np.uint8) if supplied is not None else (counts * 100 >= float(mask['coverage']) * len(plan['rows'])).astype(np.uint8)
-        if not population.any(): raise ValueError(f'{label}: population mask is empty. Review quality units, thresholds, coverage or included subjects.')
+        if not population.any():
+            hint = ('Review coverage or use a precomputed DWI mask.' if modality == 'DWI'
+                    else 'Review quality units, thresholds, coverage or included subjects.')
+            raise ValueError(f'{label}: population mask is empty. {hint}')
         if np.any(population.astype(bool) & ~finite_all):
             raise ValueError(f'{label}: invalid or nonfinite ratio/signal values occur inside the population mask. Adjust the mask or exclude affected observations.')
         _save(counts.astype(np.float32) / len(plan['rows']), reference, directory / 'coverage.nii.gz')
@@ -555,7 +576,7 @@ def execute(plan, *, prepare_only=False):
         metabolites = plan['data']['metabolites']
         display_labels = [item['label'] for item in analytes]
         workers = min(plan['randomise'].get('nproc', 1), len(metabolites))
-        _emit(f'Running Randomise for {len(metabolites)} metabolite/ratio map(s) with {workers} concurrent process(es); contrasts within each map are sequential.')
+        _emit(f'Running Randomise for {len(metabolites)} {modality} map(s) with {workers} concurrent process(es); contrasts within each map are sequential.')
         if not sys.stdout.isatty():
             total = (plan['randomise']['permutations'] * len(plan['model']['contrasts'])
                      if plan['randomise']['permutations'] > 0 else None)
@@ -576,7 +597,7 @@ def execute(plan, *, prepare_only=False):
     pd.DataFrame(summary).to_csv(output / 'results.tsv', sep='\t', index=False)
     gauge_note = ('Gauge-corrected stacks were generated for z-prefixed outputs; unprefixed metabolite and ratio analyses use raw stacks.'
                   if gauge_enabled else 'Gauge correction was not applied.')
-    atomic_text(output / 'results.json', json.dumps({'status': 'prepared' if prepare_only else 'succeeded', 'results': summary,
+    atomic_text(output / 'results.json', json.dumps({'status': 'prepared' if prepare_only else 'succeeded', 'results': summary, 'modality': modality,
                 'output_dir': str(output), 'model_columns': model['columns'], 'contrast_labels': model['contrast_labels'],
                 'gauge_correction': {'enabled': gauge_enabled,
                                      'term': str(output / 'gauge_term.nii.gz') if gauge_enabled else None},

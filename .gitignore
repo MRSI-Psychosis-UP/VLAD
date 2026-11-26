@@ -12,6 +12,7 @@ build/
 dist/
 htmlcov/
 .coverage*
+__init__.py
 
 # Private machine/cohort configuration and generated analysis output.
 VLAD_configs.txt

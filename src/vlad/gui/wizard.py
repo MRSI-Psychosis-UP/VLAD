@@ -1,4 +1,4 @@
-"""A table-centred, six-step MRSI workflow inspired by the NBS preparation UI."""
+"""A table-centred, six-step MRSI/DWI workflow."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -16,7 +16,7 @@ from vlad.gui.cohorts import atomic_text
 from vlad.gui.design import filter_rows, load_contrasts, validate_contrasts
 from vlad.gui.file_picker import path_input
 from vlad.gui.templates import _cache_home, tissue_probabilities
-from vlad.workflow.core import (build_model, discover_metabolites, parse_contrast_text,
+from vlad.workflow.core import (build_model, discover_dwi_series, discover_metabolites, parse_contrast_text,
                                 read_covariates, scan_signals, scan_quality, signature,
                                 validate_output_location, validate_population_paths)
 from vlad.workflow.runner import validate_plan
@@ -43,7 +43,9 @@ def _capture_data_widgets(state):
     if values['wf_covars'] is not None:
         text = str(values['wf_covars']).strip()
         state['covars_path_current'] = str(Path(text).expanduser().resolve()) if text else ''
-    previous = state.get('data', {})
+    if st.session_state.get('wf_modality', 'MRSI') == 'DWI':
+        return
+    previous = state.get('mrsi_data', state.get('data', {}))
     state['data'] = {
         'folder': str(values['wf_images'] if values['wf_images'] is not None else previous.get('folder', '')).strip(),
         'space': str(values['wf_space'] if values['wf_space'] is not None else previous.get('space', '')).strip().removeprefix('space-'),
@@ -54,12 +56,15 @@ def _capture_data_widgets(state):
         'resolution': str(values['wf_resolution'] if values['wf_resolution'] is not None
                           else previous.get('resolution', '')).strip().removeprefix('res-'),
     }
+    state['mrsi_data'] = state['data']
 
 
 def _restore_data_widgets(state):
     """Restore Step 1 from durable values, with the last valid scan as fallback."""
-    current = state.get('data', {})
+    current = state.get('mrsi_data', state.get('data', {}))
     scanned = state.get('signals', {}).get('config', {})
+    if scanned.get('modality') == 'DWI':
+        scanned = {}
 
     widget_for = {'folder': 'wf_images', 'space': 'wf_space', 'metabolites': 'wf_metabolites',
                   'desc': 'wf_desc', 'resolution': 'wf_resolution'}
@@ -125,6 +130,8 @@ def _scan_metabolite_folder(folder):
 
 
 def _paths(config):
+    if config.get('modality') == 'DWI':
+        return {key: config[key] for key in ('modality', 'folder', 'space', 'resolution', 'dwi_series')}
     return {key: config.get(key, '') for key in ('folder', 'space', 'resolution', 'desc')} | {'metabolites': config.get('metabolites', [])}
 
 
@@ -134,19 +141,20 @@ def _quality_selection(mask):
 
 
 def _signals(state):
-    result = state.get('signals')
+    result = state.get('dwi_signals' if state.get('data', {}).get('modality') == 'DWI' else 'signals')
     return result if result and result['fingerprint'] == signature(_paths(state.get('data', {}))) else None
 
 
 def _mask_identity(state):
     return signature([state.get('mask', {}).get('precomputed', {}),
-                      state.get('data', {}).get('space'), state.get('data', {}).get('resolution'),
-                      state.get('data', {}).get('metabolites')])
+                      _paths(state.get('data', {}))])
 
 
 def _quality(state):
     result = state.get('quality')
     mask = state.get('mask', {})
+    if state.get('data', {}).get('modality') == 'DWI':
+        return None
     if not _signals(state): return None
     return result if result and result['fingerprint'] == signature(_quality_selection(mask)) else None
 
@@ -178,11 +186,12 @@ def _table_data(state, *, quality=False):
         '—' if signals is None else ('✅' if found.get(visit, {}).get('complete', False) else '❌')
         for visit in state['visits']
     ])
-    table.insert(3, 'Quality files found', [
-        ('✅' if supplied_ok else ('—' if qc is None else
-         ('✅' if qc_found.get(visit, {}).get('complete', False) else '❌')))
-        for visit in state['visits']
-    ])
+    if state.get('data', {}).get('modality') != 'DWI':
+        table.insert(3, 'Quality files found', [
+            ('✅' if supplied_ok else ('—' if qc is None else
+             ('✅' if qc_found.get(visit, {}).get('complete', False) else '❌')))
+            for visit in state['visits']
+        ])
     table['Matching details'] = ['; '.join(found.get(visit, {}).get('issues', []) + (qc_found.get(visit, {}).get('issues', []) if quality else [])) for visit in state['visits']]
     return table, signals, qc_found
 
@@ -209,7 +218,10 @@ def _table(state, *, quality=False, editable=True):
     count = len(_selection(state)['frame'])
     if signals:
         with st.expander('Inspect matched file paths'):
-            matches = [{'Subject / session': row['visit'], 'Metabolite': met, 'Signal path': path,
+            dwi = signals['config'].get('modality') == 'DWI'
+            labels = {item['id']: item['label'] for item in signals['analytes']} if dwi else {}
+            column = 'DWI series' if dwi else 'Metabolite'
+            matches = [{'Subject / session': row['visit'], column: labels.get(met, met), 'Signal path': path,
                         **qc_found.get(row['visit'], {}).get('quality', {}).get(met, {})}
                        for row in signals['rows'] for met, path in row['images'].items()]
             st.dataframe(pd.DataFrame(matches), hide_index=True, width='stretch')
@@ -270,9 +282,86 @@ def _filter_bar(state):
             st.rerun()
 
 
+def _dwi_fields(state, folder):
+    space_column, resolution_column = st.columns(2)
+    st.session_state.setdefault('wf_dwi_space', 'mni')
+    space = space_column.text_input('Space · space-', key='wf_dwi_space')
+    resolution = resolution_column.text_input('Resolution · res- (optional)', key='wf_dwi_resolution')
+    config = {'modality': 'DWI', 'folder': folder.strip(),
+              'space': space.strip().removeprefix('space-'),
+              'resolution': resolution.strip().removeprefix('res-')}
+    fingerprint = signature(config)
+    if st.button('Scan DWI folder', disabled=not (config['folder'] and config['space']),
+                 help='Find 3D scalar-map series by their filename pattern and NIfTI headers.'):
+        state.pop('dwi_scan', None)
+        try:
+            with st.spinner('Finding DWI scalar-map series…'):
+                state['dwi_scan'] = {'fingerprint': fingerprint, 'series_visits': discover_dwi_series(
+                    config['folder'], space=config['space'], resolution=config['resolution'])}
+        except (OSError, ValueError) as exc:
+            st.error(str(exc))
+    scan = state.get('dwi_scan', {})
+    selected = []
+    if scan.get('fingerprint') == fingerprint and 'series_visits' in scan:
+        series = scan['series_visits']
+        if series:
+            visits = state.get('visits', [])
+            options = list(series)
+            labels = {label: f'{label} ({len(counts)} folder visits)' for label, counts in series.items()}
+            if visits:
+                matches = {label: sum(counts.get(visit) == 1 for visit in visits)
+                           for label, counts in series.items()}
+                options.sort(key=lambda label: (-matches[label], label.casefold()))
+                labels = {label: f'{label} ({matches[label]}/{len(visits)} TSV · {len(counts)} folder)'
+                          for label, counts in series.items()}
+            key = f'wf_dwi_series_{fingerprint[:12]}'
+            current = st.session_state.get(key, [])
+            if any(label not in series for label in current):
+                st.session_state[key] = [label for label in current if label in series]
+            selected = st.multiselect('DWI scalar maps', options, key=key, format_func=labels.__getitem__,
+                                      help='TSV counts show visits with a unique filename match. Load NIfTI paths verifies those files.')
+        else:
+            st.info('No 3D DWI scalar series matched this space and resolution.')
+    else:
+        st.caption('Choose a DWI derivative folder and scan it to list scalar maps by filename series.')
+    return config | {'dwi_series': selected}
+
+
+def _mrsi_fields(state, folder):
+    data = state.get('mrsi_data', state.get('data', {}))
+    defaults = {
+        'wf_space': data.get('space', 'MNI152NLin2009cAsym'),
+        'wf_metabolites': ' '.join(data.get('metabolites', ['NAA', 'CrPCr'])),
+        'wf_desc': data.get('desc', 'signal'),
+        'wf_resolution': data.get('resolution', ''),
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+    space = st.text_input('Space · space-', key='wf_space')
+    metabolite_field, metabolite_scan = st.columns([3, 1], vertical_alignment='bottom')
+    metabolites = metabolite_field.text_input(
+        'Metabolites and ratios', key='wf_metabolites',
+        help='List raw map labels, ratios and gauge-map contrasts, separated by spaces or commas. Examples: Glu; Glu/GABA; Glu/(Glu+GABA); (Glu+GABA)/Gln; z_Glu; zGlu-zGABA. Ratio expressions must not contain spaces.')
+    metabolite_scan.button(
+        'Scan folder', disabled=not folder.strip(),
+        help='Recursively inspect NIfTI filenames and propose their distinct met- labels. Image data is not opened.',
+        on_click=_scan_metabolite_folder, args=(folder.strip(),), use_container_width=True)
+    if message := st.session_state.get('wf_metabolite_scan_message'):
+        st.success(message)
+    if error := st.session_state.get('wf_metabolite_scan_error'):
+        st.warning(error)
+    st.caption('Use Glu for the raw map and z_Glu for gauge correction. Include at least two distinct input maps, for example z_Glu GABA. For a gauge-map difference, include its component maps too, for example z_Glu z_GABA zGlu-zGABA.')
+    a, b = st.columns(2)
+    desc = a.text_input('Signal descriptor · desc- (optional)', key='wf_desc')
+    resolution = b.text_input('Resolution · res- (optional)', key='wf_resolution')
+    return {'folder': folder.strip(), 'space': space.strip().removeprefix('space-'),
+            'metabolites': [item.removeprefix('met-') for item in re.split(r'[,\s]+', metabolites.strip()) if item],
+            'desc': desc.strip().removeprefix('desc-'), 'resolution': resolution.strip().removeprefix('res-')}
+
+
 def data_page(state):
     st.header('Data')
-    st.write('Choose the covariate table and locate one 3D signal map per metabolite and subject/session.')
+    modality = st.radio('Map modality', ['MRSI', 'DWI'], key='wf_modality', horizontal=True)
     first, second = st.columns(2)
     with first:
         table_path = path_input('Covariates TSV', key='wf_covars', value=state.get('covars_path', ''),
@@ -299,54 +388,48 @@ def data_page(state):
                     state.setdefault('widgets', {})['wf_output'] = current_output
                     st.session_state['wf_output'] = current_output
                 state['study_output_default'] = output_default
-                for key in ('signals', 'quality', 'model', 'roles', 'contrasts', 'mask_check'):
+                for key in ('signals', 'dwi_signals', 'quality', 'model', 'roles', 'contrasts', 'mask_check'):
                     state.pop(key, None)
             except (OSError, ValueError, pd.errors.ParserError) as exc:
                 st.error(str(exc))
-        folder = path_input('MRSI image folder', key='wf_images',
-                            value=state.get('data', {}).get('folder', ''), kind='directory',
-                            placeholder='/data/derivatives/mrsiprep')
-    data_defaults = {
-        'wf_space': state.get('data', {}).get('space', 'MNI152NLin2009cAsym'),
-        'wf_metabolites': ' '.join(state.get('data', {}).get('metabolites', ['NAA', 'CrPCr'])),
-        'wf_desc': state.get('data', {}).get('desc', 'signal'),
-        'wf_resolution': state.get('data', {}).get('resolution', ''),
-    }
-    for key, value in data_defaults.items():
-        st.session_state.setdefault(key, value)
+        if modality == 'DWI':
+            folder = path_input('DWI image folder', key='wf_dwi_images', kind='directory',
+                                placeholder='/data/derivatives/dwi-preprocessing')
+        else:
+            folder = path_input('MRSI image folder', key='wf_images',
+                                value=state.get('mrsi_data', state.get('data', {})).get('folder', ''),
+                                kind='directory', placeholder='/data/derivatives/mrsiprep')
     with second:
-        space = st.text_input('Space · space-', key='wf_space')
-        metabolite_field, metabolite_scan = st.columns([3, 1], vertical_alignment='bottom')
-        metabolites = metabolite_field.text_input(
-            'Metabolites and ratios', key='wf_metabolites',
-            help='List raw map labels, ratios and gauge-map contrasts, separated by spaces or commas. Examples: Glu; Glu/GABA; Glu/(Glu+GABA); (Glu+GABA)/Gln; z_Glu; zGlu-zGABA. Ratio expressions must not contain spaces.')
-        metabolite_scan.button(
-            'Scan folder', disabled=not folder.strip(),
-            help='Recursively inspect NIfTI filenames and propose their distinct met- labels. Image data is not opened.',
-            on_click=_scan_metabolite_folder, args=(folder.strip(),), use_container_width=True)
-        if message := st.session_state.get('wf_metabolite_scan_message'):
-            st.success(message)
-        if error := st.session_state.get('wf_metabolite_scan_error'):
-            st.warning(error)
-        st.caption('Use Glu for the raw map and z_Glu for gauge correction. Include at least two distinct input maps, for example z_Glu GABA. For a gauge-map difference, include its component maps too, for example z_Glu z_GABA zGlu-zGABA.')
-        a, b = st.columns(2)
-        desc = a.text_input('Signal descriptor · desc- (optional)', key='wf_desc')
-        resolution = b.text_input('Resolution · res- (optional)', key='wf_resolution')
+        if modality == 'DWI':
+            state['data'] = _dwi_fields(state, folder)
+        else:
+            state['data'] = state['mrsi_data'] = _mrsi_fields(state, folder)
     state['covars_path_current'] = str(Path(table_path).expanduser().resolve()) if table_path.strip() else ''
-    state['data'] = {'folder': folder.strip(), 'space': space.strip().removeprefix('space-'),
-                     'metabolites': [item.removeprefix('met-') for item in re.split(r'[,\s]+', metabolites.strip()) if item],
-                     'desc': desc.strip().removeprefix('desc-'), 'resolution': resolution.strip().removeprefix('res-')}
     if 'frame' not in state:
         st.info('Load the covariates TSV to display the subject/session table.')
         return
     if table_path.strip() and str(Path(table_path).expanduser().resolve()) != state['covars_path']:
         st.warning('The TSV path changed. Click Load covariates to use the new table.')
     st.caption(f'Identifiers: {state["subject"]} + {state["session"]}. BIDS prefixes are normalised; leading zeros are preserved.')
-    if st.button('Load NIfTI paths', type='primary', help='Search filenames only. Does not read image headers or voxel arrays.'):
+    load_help = ('Match each DWI series to its subject/session and check for 3D scalar maps.'
+                 if modality == 'DWI' else 'Search filenames only. Does not read image headers or voxel arrays.')
+    if st.button('Load NIfTI paths', type='primary', help=load_help):
         with st.spinner('Matching NIfTI paths…'):
-            state['signals'] = scan_signals(_paths(state['data']), state['visits'])
-        state.pop('quality', None)
-    if not _signals(state): st.info('Click Load NIfTI paths after setting or changing the image selectors.')
+            signal_key = 'dwi_signals' if modality == 'DWI' else 'signals'
+            state[signal_key] = scan_signals(_paths(state['data']), state['visits'])
+        if modality == 'MRSI':
+            state.pop('quality', None)
+    signals = _signals(state)
+    if not signals:
+        st.info('Click Load NIfTI paths after setting or changing the image selectors.')
+    elif modality == 'DWI':
+        matched = sum(row['complete'] for row in signals['rows'])
+        total = len(signals['rows'])
+        message = f'{matched}/{total} TSV visits have all selected DWI maps.'
+        if matched == total:
+            st.success(message)
+        else:
+            st.warning(f'{message} See Matching details for the remaining {total - matched} visits.')
     _filter_bar(state)
     _table(state)
 
@@ -357,15 +440,18 @@ def mask_page(state):
     if not signals:
         st.info('First load the covariate table and NIfTI paths in Data.')
         return
-    choice = st.radio('Mask source', ['Construct from quality maps', 'Precomputed mask per metabolite'], key='wf_mask_mode', horizontal=True)
+    dwi = state['data'].get('modality') == 'DWI'
+    modes = ({'Common nonzero coverage': 'coverage', 'Precomputed mask per DWI series': 'precomputed'}
+             if dwi else {'Construct from quality maps': 'quality', 'Precomputed mask per metabolite': 'precomputed'})
+    choice = st.radio('Mask source', list(modes), key='wf_dwi_mask_mode' if dwi else 'wf_mask_mode', horizontal=True)
     previous = state.get('mask', {})
-    mask = {'mode': 'quality' if choice.startswith('Construct') else 'precomputed',
-            'coverage': previous.get('coverage', 68.)}
+    mask = {'mode': modes[choice], 'modality': 'DWI' if dwi else 'MRSI',
+            'coverage': 100. if dwi else (previous.get('coverage', 68.) if previous.get('modality') != 'DWI' else 68.)}
     if mask['mode'] == 'precomputed':
         mapping = {}
         for analyte in signals['analytes']:
             mapping[analyte['id']] = path_input(
-                f'{analyte["label"]} population mask', key='wf_mask_' + analyte['id'],
+                f'{analyte["label"]} population mask', key=('wf_dwi_mask_' if dwi else 'wf_mask_') + analyte['id'],
                 extensions=('.nii', '.nii.gz'))
         mask['precomputed'] = mapping
         state['mask'] = mask
@@ -373,7 +459,11 @@ def mask_page(state):
             validate_population_paths(mapping, [item['id'] for item in signals['analytes']],
                                       state['data']['space'], state['data']['resolution'])
             state['mask_check'] = _mask_identity(state)
-            st.success('All metabolite mask paths found. Binary values and image grids will be checked when the command runs.')
+            st.success('All population mask paths found. Binary values and image grids will be checked when the command runs.')
+    elif dwi:
+        state['mask'] = mask
+        st.caption('For each DWI series, keep voxels with a finite, nonzero value in every included observation. '
+                   'Choose a precomputed mask to include valid zero-valued voxels.')
     else:
         mask['folder'] = path_input('Quality-map folder', value=state['data']['folder'], key='wf_quality_folder', kind='directory')
         a, b = st.columns(2)
@@ -564,8 +654,8 @@ def settings_page(state):
         voxelwise = st.checkbox('Also output voxelwise corrected p-values', value=False, key='wf_voxelwise')
         uncorr = st.checkbox('Output uncorrected p-values', value=False, key='wf_uncorrected')
     with b:
-        nproc = st.number_input('Concurrent metabolites (nproc)', min_value=1, max_value=64, value=4, step=1,
-                                key='wf_nproc', help='Maximum simultaneous Randomise processes. Contrasts within each metabolite remain sequential.')
+        nproc = st.number_input('Concurrent maps (nproc)', min_value=1, max_value=64, value=4, step=1,
+                                key='wf_nproc', help='Maximum simultaneous Randomise processes. Contrasts within each map remain sequential.')
         smoothing = st.number_input('Variance smoothing σ (mm)', min_value=0., value=0., step=.5, key='wf_variance', help='FSL -v; smooths variance estimates, not the input signal maps. Zero disables it.')
         seed = st.number_input('Random seed', min_value=0, value=42, key='wf_seed')
         blocks_column = st.selectbox('Exchangeability-block column (optional)', ['None', *list(state.get('frame', pd.DataFrame()).columns)], key='wf_blocks',
@@ -579,7 +669,7 @@ def settings_page(state):
                           'tfce': tfce, 'voxelwise': voxelwise, 'uncorrected': uncorr,
                           'variance_smoothing': float(smoothing), 'seed': int(seed), 'tfce_h': float(h), 'tfce_e': float(extent),
                           'tfce_c': connectivity, 'block_column': blocks_column}
-    st.caption('The model includes an intercept. Image/mask preparation and optional gauge correction are sequential to limit memory and disk pressure; Randomise then runs up to nproc metabolites concurrently. Contrasts within one metabolite remain sequential.')
+    st.caption('The model includes an intercept. Image and mask preparation run sequentially. Randomise runs up to nproc maps concurrently, with contrasts within one map tested sequentially.')
 
 
 def compile_plan(state, output):
@@ -594,12 +684,14 @@ def compile_plan(state, output):
         raise ValueError('Contrasts: review and confirm weights for the current model.')
     model['contrasts'], model['contrast_labels'] = contrasts['weights'], contrasts['labels']
     mask = state.get('mask')
-    if not mask: raise ValueError('Configure the population mask.')
+    modality = state['data'].get('modality', 'MRSI')
+    if not mask or mask.get('modality', 'MRSI') != modality:
+        raise ValueError(f'Configure the {modality} population mask.')
     qc = _quality(state)
     if mask['mode'] == 'quality' and not qc:
         raise ValueError('Population mask: load quality paths for the current selectors.')
     if mask['mode'] == 'precomputed' and state.get('mask_check') != _mask_identity(state):
-        raise ValueError('Population mask: click Load masks to check each metabolite mask.')
+        raise ValueError('Population mask: click Load masks to check each selected map mask.')
     indexed = {row['visit']: row for row in signals['rows']}
     indexed_quality = {row['visit']: row for row in qc['rows']} if qc else {}
     rows = []
@@ -620,9 +712,9 @@ def compile_plan(state, output):
         if values.str.strip().eq('').any(): raise ValueError('Exchangeability labels cannot be empty.')
         options['blocks'] = (pd.factorize(values, sort=True)[0] + 1).tolist()
     plan_data = dict(state['data'])
-    plan_data.update(metabolites=[item['id'] for item in signals['analytes']],
+    plan_data.update(modality=modality, metabolites=[item['id'] for item in signals['analytes']],
                      analytes=signals['analytes'],
-                     requested_analytes=signals['config']['metabolites'],
+                     requested_analytes=signals['config']['dwi_series' if modality == 'DWI' else 'metabolites'],
                      source_metabolites=signals['source_metabolites'])
     plan = {'version': 1, 'output_dir': str(output), 'data': plan_data, 'mask': mask, 'rows': rows, 'model': model,
             'randomise': options, 'covariates_source': state['covars_path']}
@@ -669,7 +761,14 @@ def run_page(state):
     study = path_input('Study output folder', key='wf_output', value=default_study,
                        kind='directory', allow_new=True, placeholder='/data/VLAD-study')
     state['study_output'] = study.strip()
-    run_name = st.text_input('Run name', value='MRSI-' + datetime.now().strftime('%Y%m%d-%H%M'), key='wf_run_name')
+    modality = state.get('data', {}).get('modality', 'MRSI')
+    default_name = state.get('run_name_default', '')
+    if not default_name.startswith(modality + '-'):
+        state['run_name_default'] = modality + '-' + datetime.now().strftime('%Y%m%d-%H%M')
+        if st.session_state.get('wf_run_name', default_name) == default_name:
+            st.session_state['wf_run_name'] = state['run_name_default']
+    st.session_state.setdefault('wf_run_name', state['run_name_default'])
+    run_name = st.text_input('Run name', key='wf_run_name')
     study_key = str(Path(study).expanduser().resolve()) if study.strip() else ''
     generated = state.get('generated_command')
     if generated and ('model_summary' not in generated or
@@ -735,11 +834,14 @@ def render(*, bids_dir=''):
     for key, value in saved_widgets.items():
         if key not in DATA_WIDGETS and key not in st.session_state:
             st.session_state[key] = value
-    if bids_dir and 'wf_images' not in st.session_state and not state.get('widgets', {}).get('wf_images'):
-        st.session_state['wf_images'] = bids_dir
+    if bids_dir:
+        for key in ('wf_images', 'wf_dwi_images'):
+            if key not in st.session_state and not state.get('widgets', {}).get(key):
+                mrsi_folder = state.get('mrsi_data', {}).get('folder') if key == 'wf_images' else None
+                st.session_state[key] = mrsi_folder or bids_dir
     with st.sidebar:
         st.markdown('## VLAD workflow')
-        st.caption('MRSI → population masks → voxelwise statistics')
+        st.caption('MRSI or DWI → population masks → voxelwise statistics')
         step = st.radio('Workflow', STEPS, key='wf_step', label_visibility='collapsed')
         if 'frame' in state:
             st.caption(f'{len(_selection(state)["frame"])} / {len(state["frame"])} observations included')

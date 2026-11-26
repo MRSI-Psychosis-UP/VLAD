@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         ("run", "Run the existing Bash analysis workflow"),
         ("prep", "Prepare cohort images"),
         ("configure", "Save study settings from paths and matching options"),
-        ("workflow", "Run a saved guided MRSI / Randomise plan"),
+        ("workflow", "Run a saved guided MRSI or DWI Randomise plan"),
         ("matrix-randomise", "Build Randomise matrices (legacy arguments)"),
         ("matrix-swe", "Build SwE matrices (legacy arguments)"),
         ("matrix-afni", "Build AFNI inputs (legacy arguments)"),

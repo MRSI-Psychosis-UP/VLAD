@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 
+import nibabel as nib
 import numpy as np
 import pandas as pd
 
@@ -16,6 +17,8 @@ from vlad.preparation.bids import image_entities
 
 METABOLITE_LABEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9.+-]*')
 SUM_OF_METABOLITES = 'SUMOFMETABOLITES'
+NATIVE_SPACES = {'native', 't1w', 'dwi', 't2w', 'individual', 'orig', 'original'}
+DWI_NON_SCALAR_SUFFIXES = {'mask', 'probseg', 'dseg', 'dwiref', 'sbref', 't1w', 't2w', 'xfm', 'fieldmap'}
 
 
 def validate_output_location(plan, output):
@@ -176,6 +179,75 @@ def _by_visit(index):
     return result
 
 
+def _dwi_series(index, space, resolution):
+    """Group exact post-visit filename patterns, including legacy scalar suffixes."""
+    if not space:
+        raise ValueError('Specify the exact DWI space- label.')
+    if space.casefold() in NATIVE_SPACES:
+        raise ValueError('DWI group analysis requires maps registered to a common space, such as space-mni.')
+    result = {}
+    for entry in index:
+        if entry.suffix.casefold() in DWI_NON_SCALAR_SUFFIXES or 'met' in entry.entities:
+            continue
+        stem = entry.path.name.removesuffix('.gz').removesuffix('.nii')
+        match = re.fullmatch(r'sub-([^_]+)_ses-([^_]+)_(.+)', stem)
+        if not match:
+            continue
+        sub, ses, series = match.groups()
+        tags = dict(re.findall(r'(?:^|_)(space|res)-([^_]+)', series))
+        if tags.get('space') != space or (resolution and tags.get('res') != resolution):
+            continue
+        result.setdefault(series, {}).setdefault(f'{sub}_{ses}', []).append(entry.path)
+    return result
+
+
+def _dwi_header_issue(path):
+    try:
+        shape = nib.load(path).shape
+    except (OSError, ValueError, nib.filebasedimages.ImageFileError) as exc:
+        return f'Cannot read NIfTI header {path.name}: {exc}'
+    if len(shape) != 3:
+        return f'{path.name}: expected a scalar 3D DWI map, found shape {shape}.'
+    return ''
+
+
+def discover_dwi_series(folder, *, space, resolution=''):
+    """List DWI series with a 3D representative and their per-visit file counts."""
+    series = _dwi_series(index_images(folder), space, resolution)
+    return {label: {visit: len(paths) for visit, paths in visits.items()}
+            for label, visits in sorted(series.items())
+            if not _dwi_header_issue(next(iter(visits.values()))[0])}
+
+
+def _scan_dwi_signals(config, visits):
+    selected = config.get('dwi_series', [])
+    if not selected or len(set(selected)) != len(selected):
+        raise ValueError('Choose distinct DWI scalar-map series from the folder scan.')
+    indexed = _dwi_series(index_images(config['folder']), config.get('space', ''), config.get('resolution', ''))
+    analytes = []
+    for label in selected:
+        slug = re.sub(r'[^A-Za-z0-9.+-]+', '-', label)[:80].rstrip('.-')
+        identifier = f'dwi-{slug}-{signature(label)[:8]}'
+        analytes.append({'id': identifier, 'label': label, 'operation': 'identity',
+                         'numerator': identifier, 'denominator': [], 'components': [identifier]})
+    rows = []
+    for visit in visits:
+        images, issues = {}, []
+        for analyte in analytes:
+            label = analyte['label']
+            matches = indexed.get(label, {}).get(visit, [])
+            if len(matches) != 1:
+                detail = '; '.join(str(path) for path in matches[:3])
+                issues.append(f'{label}: {len(matches)} matches' + (f' ({detail})' if detail else ''))
+            elif issue := _dwi_header_issue(matches[0]):
+                issues.append(issue)
+            else:
+                images[analyte['id']] = str(matches[0])
+        rows.append({'visit': visit, 'images': images, 'issues': issues, 'complete': not issues})
+    return {'config': config, 'rows': rows, 'analytes': analytes,
+            'source_metabolites': [item['id'] for item in analytes], 'fingerprint': signature(config)}
+
+
 def _match(index, visit, space, resolution='', desc='', metabolite=None, scope='Metabolite', signal=None):
     subject, session = visit.split('_', 1)
     filters = {'sub': subject, 'ses': session, 'space': space}
@@ -195,7 +267,9 @@ def _match(index, visit, space, resolution='', desc='', metabolite=None, scope='
 
 
 def scan_signals(config: dict, visits: list[str]) -> dict:
-    """Only inspect directory entries. Do not open NIfTI headers or voxel arrays."""
+    """Match visits by filename and check DWI dimensionality without loading voxels."""
+    if config.get('modality') == 'DWI':
+        return _scan_dwi_signals(config, visits)
     if not config.get('space'):
         raise ValueError('Specify the space- label.')
     parsed = parse_analytes(config.get('metabolites', []))

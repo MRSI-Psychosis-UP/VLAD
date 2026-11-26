@@ -12,7 +12,7 @@ unless `--headless` or `--no-browser` is supplied. No virtual-environment
 activation is needed. Use `./vlad gui --port 2343` when port 2342 is occupied.
 Stop the browser server with Ctrl+C in its launch terminal.
 
-## Guided MRSI workflow
+## Guided MRSI and DWI workflow
 
 The default interface follows six steps, with **Back** / **Next** controls and a
 persistent workflow sidebar:
@@ -25,8 +25,8 @@ The same panel selects the persistent Light or Dark theme and the local VLAD
 GUI data folder. That folder contains preferences and background-job history.
 When it changes, VLAD starts using the new folder and leaves the old one intact.
 
-1. **Data** — load `covars.tsv` containing `participant_id` and `session_id`,
-   choose the image folder and `space-` / `met-`
+1. **Data** — choose **MRSI** or **DWI** and load `covars.tsv` containing
+   `participant_id` and `session_id`. For MRSI, choose the image folder and `space-` / `met-`
    labels, with optional `desc-` and `res-` selectors. Once the image folder is
    set, **Scan folder** proposes the distinct `met-` labels found recursively in
    NIfTI filenames that also match the current `space-`, `desc-`, and optional
@@ -54,6 +54,16 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    per-map group means/z maps and a JSON audit are retained alongside corrected
    testing inputs.
 
+   For DWI, choose a derivative folder such as `dwi-preprocessing/`, enter its
+   exact shared space label, and optionally enter the filename resolution.
+   Click **Scan DWI folder** and select one or more 3D scalar-map series.
+   VLAD lists the filename pattern after `sub-…_ses-…_`, keeping model,
+   acquisition, run and harmonization variants separate. The picker shows the
+   count of unique filename matches in the loaded TSV alongside the total
+   folder visits. **Load NIfTI paths** checks those files and shows how many TSV
+   visits have every selected series. Four-dimensional diffusion acquisitions
+   and subject-native group analyses are rejected.
+
    Use **+ Add filter** to stack categorical
    or numeric covariate rules; active filters combine with AND and can be removed
    individually. Selecting **Exclude** gives the row a red **🔴 Excluded** status.
@@ -69,6 +79,10 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    subject, all criteria must pass. The population mask retains a voxel when
    at least the chosen percentage of the **final included subjects** passes.
    Supplied population masks are used directly, after binary/grid validation.
+   For DWI, **Common nonzero coverage** keeps voxels that are finite and nonzero
+   in every included observation of a series. Use **Precomputed mask per DWI
+   series** when valid zero values should be included. Each series must have
+   the same grid across its observations.
    Under **Tissue masks for report histograms**, download TemplateFlow's GM and
    WM probability maps for the exact analysis space. VLAD reuses them from its
    local `.cache/templateflow` directory or `TEMPLATEFLOW_HOME`. A voxel is
@@ -96,7 +110,7 @@ When it changes, VLAD starts using the new folder and leaves the old one intact.
    similarly uses `Sex: 1 > 0`. Continuous variables use `slope > 0` and
    `slope < 0`. Changed model coding requires reviewing the contrasts.
 5. **Randomise settings** — set permutations (5000 by default; 0 is exhaustive),
-   concurrent metabolites (`nproc`, 4 by default), TFCE and its
+   concurrent maps (`nproc`, 4 by default), TFCE and its
    H/E/connectivity parameters, voxelwise/uncorrected outputs,
    variance smoothing, seed and optional exchangeability blocks. Repeated
    subjects require an explicitly specified block column or selecting one visit.
